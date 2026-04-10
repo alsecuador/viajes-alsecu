@@ -1,0 +1,1253 @@
+from __future__ import annotations
+
+import io
+import os
+import re
+from dataclasses import dataclass, field
+from datetime import date, datetime, time
+from typing import Any, Literal
+
+import pandas as pd
+import streamlit as st
+from dateutil import parser as date_parser
+
+from pdf_builder import build_plan_pdf
+
+
+PERSON_CSV_PATH = "BD.csv"
+# Ruta alternativa del CSV de personal (misma estructura). Ej.: PLAN_BD_CSV=\\servidor\recursos\BD.csv
+PERSON_CSV_ENV = "PLAN_BD_CSV"
+# Máximo de técnicos por viaje (1–20). Por defecto 10. Ej.: PLAN_MAX_TECNICOS=12
+MAX_TECNICOS_ENV = "PLAN_MAX_TECNICOS"
+# Preferir Camionetas.csv (Placa, Modelo, Color); si no existe, BD_CAMIONETAS.csv (PLACA, TIPO, MODELO_ANIO)
+VEHICLE_CSV_PATH = "Camionetas.csv"
+VEHICLE_CSV_FALLBACK = "BD_CAMIONETAS.csv"
+DEFAULT_COMPANY_NAME = "ALS ECUADOR"
+DEFAULT_LOGO_PATH = os.path.join("assets", "als_logo.png")
+DEFAULT_DOC_CODE = "RU-40"
+DEFAULT_REV = "Rev. 01"
+DEFAULT_DOC_DATE = "08-09-2025"
+
+# Carpeta por defecto para guardar PDFs (compartida en red). Sobrescribible en la app o con variable de entorno.
+PDF_OUTPUT_DIR_ENV = "PLAN_PDF_OUTPUT_DIR"
+
+# Ubicaciones Ecuador: provincia → cantón → parroquia
+# Prioridad: Excel oficial CODIFICACIÓN_2025.xlsx (misma carpeta que la app), luego ubicaciones.csv
+UBICACIONES_XLSX_PRIMARY = "CODIFICACIÓN_2025.xlsx"
+UBICACIONES_XLSX_ALT = "CODIFICACION_2025.xlsx"
+UBICACIONES_CSV_PATH = "ubicaciones.csv"
+UBICACIONES_SHEET_ENV = "PLAN_CODIFICACION_SHEET"  # opcional: nombre de hoja Excel
+
+# Contactos de emergencia: atajos con nombre en BD; o cualquier fila de BD; o texto libre
+EMERGENCY_PRESET_TO_BD_NAME: dict[str, str] = {
+    "Santiago Montalvo": "Montalvan Samaniego Santiago Javier",
+    "David Solano": "Solano Bazurto David Roberto",
+}
+EMERGENCY_FROM_BD = "Otra persona de la lista (BD)…"
+EMERGENCY_OTRO_TEXTO = "Otro (escribir nombre y teléfono)"
+EMERGENCY_SELECT_OPTIONS = [
+    "—",
+    "Santiago Montalvo",
+    "David Solano",
+    EMERGENCY_FROM_BD,
+    EMERGENCY_OTRO_TEXTO,
+]
+
+# Persona no catalogada: técnicos, firmas, etc.
+PERSON_SEL_OTRO_MANUAL = "Otro (no está en BD — escribir datos)"
+
+# Técnicos / conductores en el viaje (máximo por defecto; ver _max_tecnicos_viaje())
+MAX_TECNICOS_VIAJE_DEFAULT = 10
+
+
+def _resolve_emergency_contact(
+    choice: str,
+    otro_nombre: str,
+    otro_tel: str,
+    people_df: pd.DataFrame,
+    *,
+    bd_pick_name: str = "",
+) -> tuple[str, str]:
+    """Devuelve (nombre_para_pdf, teléfono)."""
+    if choice == "—":
+        return "", ""
+    if choice in EMERGENCY_PRESET_TO_BD_NAME:
+        nombre_corto = choice
+        bd_name = EMERGENCY_PRESET_TO_BD_NAME[choice]
+        tel = _person_lookup(people_df, bd_name)["cel"]
+        return nombre_corto, tel
+    if choice == EMERGENCY_FROM_BD:
+        if not bd_pick_name or bd_pick_name == "—":
+            return "", ""
+        d = _person_lookup(people_df, bd_pick_name)
+        return d["name"], d["cel"]
+    # Otro (texto libre)
+    return (otro_nombre or "").strip(), (otro_tel or "").strip()
+
+
+def _parse_extra_names(text: str) -> list[str]:
+    if not text or not str(text).strip():
+        return []
+    parts = re.split(r"[\n,;]+", str(text))
+    return [p.strip() for p in parts if p.strip()]
+
+
+def _merge_passenger_lists(from_multiselect: list[str], extra_text: str) -> list[str]:
+    order: list[str] = []
+    seen: set[str] = set()
+    for p in from_multiselect + _parse_extra_names(extra_text):
+        p = (p or "").strip()
+        if p and p not in seen:
+            seen.add(p)
+            order.append(p)
+    return order
+
+
+def _opciones_con_manual(people_opts: list[str]) -> list[str]:
+    return people_opts + [PERSON_SEL_OTRO_MANUAL]
+
+
+def _valor_firma(sel: str, manual_nombre: str) -> str:
+    if sel == "—":
+        return ""
+    if sel == PERSON_SEL_OTRO_MANUAL:
+        return (manual_nombre or "").strip()
+    return sel
+
+
+def _parse_date(value: Any) -> date | None:
+    if value is None or (isinstance(value, float) and pd.isna(value)):
+        return None
+    if isinstance(value, date) and not isinstance(value, datetime):
+        return value
+    if isinstance(value, datetime):
+        return value.date()
+    if isinstance(value, str) and value.strip():
+        try:
+            return date_parser.parse(value, dayfirst=True).date()
+        except Exception:
+            return None
+    return None
+
+
+def _format_hora_plan(t: time) -> str:
+    """Hora para el PDF / datos (ej. 17h00, 09h05)."""
+    return f"{t.hour}h{t.minute:02d}"
+
+
+def _resolved_person_csv_path() -> str:
+    p = (os.environ.get(PERSON_CSV_ENV) or "").strip()
+    return p if p else PERSON_CSV_PATH
+
+
+def _max_tecnicos_viaje() -> int:
+    raw = (os.environ.get(MAX_TECNICOS_ENV) or "").strip()
+    if raw.isdigit():
+        return max(1, min(20, int(raw)))
+    return MAX_TECNICOS_VIAJE_DEFAULT
+
+
+def _norm_header(h: str) -> str:
+    t = str(h).strip().upper()
+    for a, b in (("Á", "A"), ("É", "E"), ("Í", "I"), ("Ó", "O"), ("Ú", "U"), ("\u00d1", "N")):
+        t = t.replace(a, b)
+    return " ".join(t.split())
+
+
+def _pick_csv_column(df: pd.DataFrame, candidates: list[str]) -> str | None:
+    nh = {_norm_header(c): c for c in df.columns}
+    for cand in candidates:
+        k = _norm_header(cand)
+        if k in nh:
+            return nh[k]
+    return None
+
+
+def _read_person_csv_raw(path: str) -> pd.DataFrame:
+    """Lee BD de personal con UTF-8 (con o sin BOM) y cabeceras flexibles."""
+    try:
+        df = pd.read_csv(path, dtype=str, keep_default_na=False, encoding="utf-8-sig")
+    except UnicodeDecodeError:
+        df = pd.read_csv(path, dtype=str, keep_default_na=False, encoding="latin-1")
+    df.columns = [str(c).strip() for c in df.columns]
+    return df
+
+
+def _coerce_people_dataframe(raw: pd.DataFrame) -> pd.DataFrame:
+    col_nombre = _pick_csv_column(
+        raw,
+        [
+            "APELLIDOS Y NOMBRES",
+            "NOMBRES Y APELLIDOS",
+            "NOMBRE COMPLETO",
+            "NOMBRES",
+            "APELLIDOS NOMBRES",
+        ],
+    )
+    col_cel = _pick_csv_column(
+        raw,
+        ["CELULAR", "TELEFONO", "TELÉFONO", "TEL", "CEL", "MOVIL", "MÓVIL", "TELEFONO MOVIL"],
+    )
+    col_id = _pick_csv_column(
+        raw,
+        ["C. IDENTIDAD", "CEDULA", "CÉDULA", "CI", "C.I.", "C.I", "IDENTIFICACION", "IDENTIFICACIÓN"],
+    )
+    if not col_nombre:
+        return pd.DataFrame(columns=["APELLIDOS Y NOMBRES", "CELULAR", "C. IDENTIDAD"])
+
+    n = len(raw)
+    out = pd.DataFrame(
+        {
+            "APELLIDOS Y NOMBRES": raw[col_nombre].astype(str),
+            "CELULAR": raw[col_cel].astype(str)
+            if col_cel
+            else pd.Series([""] * n, index=raw.index, dtype=object),
+            "C. IDENTIDAD": raw[col_id].astype(str)
+            if col_id
+            else pd.Series([""] * n, index=raw.index, dtype=object),
+        }
+    )
+    out["APELLIDOS Y NOMBRES"] = out["APELLIDOS Y NOMBRES"].str.strip()
+    out["CELULAR"] = out["CELULAR"].str.strip()
+    out["C. IDENTIDAD"] = out["C. IDENTIDAD"].str.strip()
+    out = out[out["APELLIDOS Y NOMBRES"].str.len() > 0]
+    return out
+
+
+@st.cache_data(show_spinner=False)
+def _cached_load_people(path: str, _mtime: float, _size: int) -> pd.DataFrame:
+    """Cache por ruta + mtime + tamaño: detecta cualquier guardado del CSV."""
+    try:
+        raw = _read_person_csv_raw(path)
+        return _coerce_people_dataframe(raw)
+    except Exception:
+        return pd.DataFrame(columns=["APELLIDOS Y NOMBRES", "CELULAR", "C. IDENTIDAD"])
+
+
+def _load_people() -> pd.DataFrame:
+    path = _resolved_person_csv_path()
+    if not os.path.isfile(path):
+        return pd.DataFrame(columns=["APELLIDOS Y NOMBRES", "CELULAR", "C. IDENTIDAD"])
+    st_info = os.stat(path)
+    return _cached_load_people(path, st_info.st_mtime, st_info.st_size)
+
+
+@st.cache_data(show_spinner=False)
+def _cached_load_vehicles(path: str, _mtime: float) -> pd.DataFrame:
+    """
+    BD de camionetas/vehículos (cacheada).
+
+    - Camionetas.csv: PLACA, MODELO, COLOR (tipo por defecto: Camioneta)
+    - BD_CAMIONETAS.csv: PLACA, TIPO, MODELO_ANIO
+    """
+    try:
+        df = pd.read_csv(path)
+    except Exception:
+        return pd.DataFrame(columns=["PLACA", "TIPO", "MODELO_ANIO"])
+
+    df.columns = [c.strip().upper() for c in df.columns]
+    if "PLACA" not in df.columns:
+        return pd.DataFrame(columns=["PLACA", "TIPO", "MODELO_ANIO"])
+
+    placa = df["PLACA"].astype(str).str.strip()
+
+    if "TIPO" in df.columns:
+        tipo = df["TIPO"].astype(str).str.strip()
+        tipo = tipo.mask(tipo.isin(["", "nan", "None"]), "Camioneta")
+    else:
+        tipo = pd.Series(["Camioneta"] * len(df), index=df.index, dtype=object)
+
+    if "MODELO_ANIO" in df.columns and not df["MODELO_ANIO"].fillna("").astype(str).str.strip().eq("").all():
+        modelo = df["MODELO_ANIO"].astype(str).str.strip()
+    elif "MODELO" in df.columns:
+        m = df["MODELO"].astype(str).str.strip()
+        if "COLOR" in df.columns:
+            c = df["COLOR"].astype(str).str.strip().replace({"nan": "", "None": ""})
+            modelo = m + c.map(lambda x: f" ({x})" if x else "")
+        else:
+            modelo = m
+    else:
+        modelo = pd.Series([""] * len(df), index=df.index)
+
+    out = pd.DataFrame({"PLACA": placa, "TIPO": tipo, "MODELO_ANIO": modelo.astype(str).str.strip()})
+    out = out[out["PLACA"].str.len() > 0]
+    return out
+
+
+def _load_vehicles() -> pd.DataFrame:
+    path = VEHICLE_CSV_PATH if os.path.exists(VEHICLE_CSV_PATH) else VEHICLE_CSV_FALLBACK
+    if not os.path.isfile(path):
+        return pd.DataFrame(columns=["PLACA", "TIPO", "MODELO_ANIO"])
+    return _cached_load_vehicles(path, os.path.getmtime(path))
+
+
+def _vehicle_options(df: pd.DataFrame) -> list[str]:
+    if df is None or df.empty:
+        return ["—"]
+    # etiqueta: PLACA — TIPO — MODELO
+    labels = []
+    for _, r in df.iterrows():
+        placa = str(r.get("PLACA") or "").strip()
+        tipo = str(r.get("TIPO") or "").strip()
+        modelo = str(r.get("MODELO_ANIO") or "").strip()
+        labels.append(" — ".join([x for x in [placa, tipo, modelo] if x]))
+    return ["—"] + sorted(set(labels))
+
+
+def _vehicle_lookup(df: pd.DataFrame, label: str) -> dict[str, str]:
+    if label == "—" or not label.strip() or df is None or df.empty:
+        return {"placa": "", "tipo": "", "modelo_anio": ""}
+    placa = label.split(" — ", 1)[0].strip()
+    row = df[df["PLACA"] == placa].head(1)
+    if row.empty:
+        return {"placa": placa, "tipo": "", "modelo_anio": ""}
+    r = row.iloc[0].to_dict()
+    return {
+        "placa": str(r.get("PLACA", "")).strip(),
+        "tipo": str(r.get("TIPO", "")).strip(),
+        "modelo_anio": str(r.get("MODELO_ANIO", "")).strip(),
+    }
+
+
+def _person_options(df: pd.DataFrame) -> list[str]:
+    return ["—"] + sorted(df["APELLIDOS Y NOMBRES"].unique().tolist())
+
+
+def _person_lookup(df: pd.DataFrame, name: str) -> dict[str, str]:
+    if name == "—":
+        return {"name": "", "cel": "", "id": ""}
+    row = df[df["APELLIDOS Y NOMBRES"] == name].head(1)
+    if row.empty:
+        return {"name": name, "cel": "", "id": ""}
+    r = row.iloc[0].to_dict()
+    return {
+        "name": str(r.get("APELLIDOS Y NOMBRES", "")).strip(),
+        "cel": str(r.get("CELULAR", "")).strip(),
+        "id": str(r.get("C. IDENTIDAD", "")).strip(),
+    }
+
+
+@dataclass
+class Stop:
+    n: int
+    lugar: str = ""
+    motivo: str = ""
+    tiempo_min: str = ""
+
+
+@dataclass
+class PlanData:
+    # Encabezado
+    empresa_nombre: str = DEFAULT_COMPANY_NAME
+    empresa_logo_bytes: bytes | None = None
+    empresa_logo_mime: str | None = None
+    doc_code: str = DEFAULT_DOC_CODE
+    doc_rev: str = DEFAULT_REV
+    doc_date: str = DEFAULT_DOC_DATE
+
+    # 1. Datos generales — técnicos (cantidad según _max_tecnicos_viaje()), solo filas con persona elegida (no "—")
+    conductores: list[str] = field(default_factory=list)
+    cedulas_conductores: list[str] = field(default_factory=list)
+    celulares_conductores: list[str] = field(default_factory=list)
+    fecha_elab: date | None = None
+    cargo: str = "Técnico de Operaciones"
+    origen: str = ""
+    placa: str = ""
+    tipo_vehiculo: str = ""
+    modelo_anio: str = ""
+    emergencia_1: str = ""
+    emergencia_2: str = ""
+    tel_emergencia_1: str = ""
+    tel_emergencia_2: str = ""
+
+    # 2. Planificación
+    destino: str = ""
+    empresa: str = ""
+    orden_trabajo: str = ""
+    fecha_salida: date | None = None
+    hora_salida: str = ""
+    fecha_llegada: date | None = None
+    hora_llegada: str = ""
+    distancia_km: str = ""
+    duracion_horas: str = ""
+    proposito: str = ""
+    condiciones_camino: str = ""
+
+    # 3. Paradas (ida)
+    paradas_ida: list[Stop] = field(default_factory=list)
+
+    # 4. Peligros
+    peligro_lluvia: bool = False
+    peligro_niebla: bool = False
+    peligro_nieve_hielo: bool = False
+    peligro_nocturna: bool = False
+    peligro_carretera_mala: bool = False
+    peligro_delincuencia: bool = False
+    otros_peligros: str = ""
+    observaciones: str = ""
+    international_sos_text: str = ""
+    international_sos_imagen_bytes: bytes | None = None
+    international_sos_imagen_mime: str | None = None
+
+    # pasajeros (listas)
+    pasajeros_ida: list[str] = field(default_factory=list)
+
+    # 5. Vuelta
+    vuelta_hora_salida: str = ""
+    vuelta_hora_llegada: str = ""
+    vuelta_fecha_salida: date | None = None
+    vuelta_fecha_llegada: date | None = None
+    pasajeros_vuelta: list[str] = field(default_factory=list)
+    paradas_vuelta: list[Stop] = field(default_factory=list)
+
+    # 6. Aprobación
+    firma_elabora: str = ""
+    firma_conductor_1: str = ""
+    firma_conductor_2: str = ""
+    firma_aprueba_1: str = ""
+    firma_aprueba_2: str = ""
+    fecha_firma: date | None = None
+
+    # Imagen ruta
+    ruta_imagen_bytes: bytes | None = None
+    ruta_imagen_mime: str | None = None
+    ruta_vuelta_imagen_bytes: bytes | None = None
+    ruta_vuelta_imagen_mime: str | None = None
+
+
+def _init_state():
+    if "paradas_ida" not in st.session_state:
+        st.session_state.paradas_ida = pd.DataFrame(
+            [{"N°": 1, "Lugar / Ciudad": "", "Motivo": "", "Tiempo (min)": ""}]
+        )
+    if "paradas_vuelta" not in st.session_state:
+        st.session_state.paradas_vuelta = pd.DataFrame(
+            columns=["N°", "Lugar / Ciudad", "Motivo", "Tiempo (min)"]
+        )
+    if "shared_pdf_folder" not in st.session_state:
+        st.session_state.shared_pdf_folder = os.environ.get(PDF_OUTPUT_DIR_ENV, "")
+    if "ubicaciones_df" not in st.session_state:
+        st.session_state.ubicaciones_df = None
+
+
+def _col_norm(c: Any) -> str:
+    return (
+        str(c)
+        .strip()
+        .upper()
+        .replace("Ó", "O")
+        .replace("Á", "A")
+        .replace("É", "E")
+        .replace("Í", "I")
+        .replace("Ú", "U")
+    )
+
+
+def _pick_columna_geografia(df: pd.DataFrame, tipo: str) -> str | None:
+    """
+    tipo: PROVINCIA | CANTON | PARROQUIA
+    Prioriza columnas con NOMBRE / DESCRIPCIÓN sobre códigos (COD_*).
+    Compatible con tablas tipo INEC / CODIFICACIÓN DPA (DPA_DESPRO, DPA_DESCAN, DPA_DESPAR).
+    """
+    cols = list(df.columns)
+
+    # Nomenclatura estándar INEC en Excel CODIFICACIÓN (nombres geográficos, no códigos)
+    dpa_token = {"PROVINCIA": "DESPRO", "CANTON": "DESCAN", "PARROQUIA": "DESPAR"}
+    tok = dpa_token[tipo]
+    for c in cols:
+        u = _col_norm(c)
+        if tok in u:
+            return c
+
+    def score(col_name: str) -> tuple[int, int]:
+        u = _col_norm(col_name)
+        s = 0
+        if "NOMBRE" in u or "DESCRIP" in u:
+            s += 10
+        if "COD" in u or u.startswith("DPA") and "COD" in u:
+            s -= 5
+        return (s, -len(u))
+
+    candidates: list[str] = []
+    for c in cols:
+        u = _col_norm(c)
+        if tipo == "PROVINCIA" and "PROVINCIA" in u:
+            candidates.append(c)
+        elif tipo == "CANTON" and "CANT" in u and "CANTIDAD" not in u:
+            candidates.append(c)
+        elif tipo == "PARROQUIA" and "PARROQ" in u:
+            candidates.append(c)
+    if not candidates:
+        return None
+    candidates.sort(key=lambda x: score(x), reverse=True)
+    return candidates[0]
+
+
+def _normalize_ubicaciones_df(df: pd.DataFrame) -> pd.DataFrame | None:
+    """Provincia / cantón / parroquia: nombres de columna flexibles (CSV o Excel INEC)."""
+    if df is None or df.empty:
+        return None
+    df = df.copy()
+    df.columns = [str(c).strip() for c in df.columns]
+
+    pcol = _pick_columna_geografia(df, "PROVINCIA")
+    ccol = _pick_columna_geografia(df, "CANTON")
+    rcol = _pick_columna_geografia(df, "PARROQUIA")
+
+    # Respaldo: nombres exactos simples
+    if not pcol or not ccol or not rcol:
+        col_map: dict[str, str] = {}
+        for c in df.columns:
+            x = _col_norm(c)
+            if x == "PROVINCIA":
+                col_map["PROVINCIA"] = c
+            elif x in ("CANTON", "CANTÓN"):
+                col_map["CANTON"] = c
+            elif x.startswith("PARROQ"):
+                col_map["PARROQUIA"] = c
+        if len(col_map) == 3:
+            pcol, ccol, rcol = col_map["PROVINCIA"], col_map["CANTON"], col_map["PARROQUIA"]
+
+    if not pcol or not ccol or not rcol:
+        return None
+
+    out = df[[pcol, ccol, rcol]].copy()
+    out.columns = ["PROVINCIA", "CANTON", "PARROQUIA"]
+    for c in out.columns:
+        out[c] = out[c].astype(str).str.strip().replace({"nan": "", "None": ""})
+    out = out[(out["PROVINCIA"] != "") & (out["CANTON"] != "") & (out["PARROQUIA"] != "")]
+    out = out.drop_duplicates().sort_values(["PROVINCIA", "CANTON", "PARROQUIA"])
+    return out if not out.empty else None
+
+
+def _ruta_excel_codificacion() -> str | None:
+    """Busca el Excel de codificación en la carpeta de trabajo (nombre exacto o *CODIFIC*2025*.xlsx)."""
+    for name in (UBICACIONES_XLSX_PRIMARY, UBICACIONES_XLSX_ALT):
+        if os.path.isfile(name):
+            return name
+    # Windows: el nombre con tilde en disco puede no coincidir con el literal; se busca por listdir
+    try:
+        for fn in os.listdir("."):
+            if not str(fn).lower().endswith(".xlsx"):
+                continue
+            u = str(fn).upper().replace("Ó", "O").replace("Á", "A")
+            if "2025" not in u:
+                continue
+            if "CODIFIC" in u and os.path.isfile(fn):
+                return fn
+    except Exception:
+        pass
+    try:
+        import glob
+
+        for p in glob.glob("*.xlsx"):
+            u = os.path.basename(p).upper().replace("Ó", "O")
+            if "2025" in u and "CODIFIC" in u:
+                return p
+    except Exception:
+        pass
+    return None
+
+
+def _sheet_excel_ubicaciones() -> str | int:
+    s = os.environ.get(UBICACIONES_SHEET_ENV, "0")
+    if s.isdigit():
+        return int(s)
+    return s
+
+
+def _read_excel_kw() -> dict[str, Any]:
+    return {
+        "sheet_name": _sheet_excel_ubicaciones(),
+        "dtype": str,
+        "engine": "openpyxl",
+        "keep_default_na": False,
+    }
+
+
+def _leer_excel_ubicaciones_con_header(path_or_bytes: str | bytes, *, from_path: bool) -> pd.DataFrame:
+    """
+    El archivo CODIFICACIÓN INEC suele tener títulos en la fila 2 (header=1).
+    Se prueba header 1, 0, 2, 3 hasta que _normalize reconozca provincia/cantón/parroquia.
+    """
+    kw = _read_excel_kw()
+    for header in (1, 0, 2, 3):
+        try:
+            if from_path:
+                raw = pd.read_excel(path_or_bytes, header=header, **kw)
+            else:
+                raw = pd.read_excel(io.BytesIO(path_or_bytes), header=header, **kw)
+            if _normalize_ubicaciones_df(raw) is not None:
+                return raw
+        except Exception:
+            pass
+    if from_path:
+        return pd.read_excel(path_or_bytes, header=1, **kw)
+    return pd.read_excel(io.BytesIO(path_or_bytes), header=1, **kw)
+
+
+def _leer_excel_ubicaciones(path: str) -> pd.DataFrame:
+    return _leer_excel_ubicaciones_con_header(path, from_path=True)
+
+
+def _leer_excel_ubicaciones_bytes(data: bytes) -> pd.DataFrame:
+    return _leer_excel_ubicaciones_con_header(data, from_path=False)
+
+
+@st.cache_data(show_spinner=False)
+def _cached_norm_ubicaciones_excel(path: str, _mtime: float) -> pd.DataFrame | None:
+    """Evita releer y normalizar el Excel INEC en cada clic (lo más pesado al abrir)."""
+    try:
+        raw = _leer_excel_ubicaciones(path)
+        return _normalize_ubicaciones_df(raw)
+    except Exception:
+        return None
+
+
+@st.cache_data(show_spinner=False)
+def _cached_norm_ubicaciones_csv(path: str, _mtime: float) -> pd.DataFrame | None:
+    try:
+        raw = pd.read_csv(path, dtype=str, keep_default_na=False)
+        return _normalize_ubicaciones_df(raw)
+    except Exception:
+        return None
+
+
+def _load_ubicaciones_desde_archivo_local() -> None:
+    if st.session_state.get("ubicaciones_df") is not None:
+        return
+    xlsx_path = _ruta_excel_codificacion()
+    if xlsx_path and os.path.isfile(xlsx_path):
+        norm = _cached_norm_ubicaciones_excel(xlsx_path, os.path.getmtime(xlsx_path))
+        if norm is not None:
+            st.session_state.ubicaciones_df = norm
+            return
+    if not os.path.isfile(UBICACIONES_CSV_PATH):
+        return
+    norm = _cached_norm_ubicaciones_csv(UBICACIONES_CSV_PATH, os.path.getmtime(UBICACIONES_CSV_PATH))
+    if norm is not None:
+        st.session_state.ubicaciones_df = norm
+
+
+def _ubicacion_campo(df: pd.DataFrame | None, etiqueta: str, key_prefix: str) -> str:
+    """
+    Devuelve texto para origen/destino. Con BD: cascada provincia/cantón/parroquia.
+    Sin BD: texto libre. Debe estar fuera de st.form para que los desplegables reaccionen al instante.
+    """
+    if df is None or df.empty:
+        return st.text_input(
+            etiqueta,
+            value="",
+            placeholder="Ej.: Tonsupa / Esmeraldas",
+            key=f"loc_{key_prefix}_manual",
+        )
+    provs = ["—"] + sorted(df["PROVINCIA"].dropna().unique().tolist())
+    prov = st.selectbox(f"{etiqueta} — Provincia", provs, key=f"loc_{key_prefix}_prov")
+    sub = df[df["PROVINCIA"] == prov] if prov != "—" else df.iloc[0:0]
+    cants = ["—"] + sorted(sub["CANTON"].dropna().unique().tolist()) if not sub.empty else ["—"]
+    cant = st.selectbox(f"{etiqueta} — Cantón", cants, key=f"loc_{key_prefix}_cant")
+    sub2 = sub[sub["CANTON"] == cant] if cant != "—" and not sub.empty else df.iloc[0:0]
+    parrs = ["—"] + sorted(sub2["PARROQUIA"].dropna().unique().tolist()) if not sub2.empty else ["—"]
+    parr = st.selectbox(f"{etiqueta} — Parroquia", parrs, key=f"loc_{key_prefix}_parr")
+    if prov != "—" and cant != "—" and parr != "—":
+        return f"{parr}, {cant} — {prov}"
+    return ""
+
+
+def _df_to_stops(df: pd.DataFrame) -> list[Stop]:
+    if df is None or df.empty:
+        return []
+    out: list[Stop] = []
+    for _, r in df.iterrows():
+        n_raw = str(r.get("N°") or "").strip()
+        if not n_raw:
+            continue
+        try:
+            n = int(float(n_raw))
+        except Exception:
+            continue
+        if n <= 0:
+            continue
+        out.append(
+            Stop(
+                n=n,
+                lugar=str(r.get("Lugar / Ciudad") or "").strip(),
+                motivo=str(r.get("Motivo") or "").strip(),
+                tiempo_min=str(r.get("Tiempo (min)") or "").strip(),
+            )
+        )
+    return out
+
+
+def main():
+    st.set_page_config(page_title="Plan de Gestión de Viaje ALS Ecuador", layout="wide")
+    _init_state()
+    _load_ubicaciones_desde_archivo_local()
+
+    people_df = _load_people()
+    people_opts = _person_options(people_df)
+
+    vehicles_df = _load_vehicles()
+    vehicles_opts = _vehicle_options(vehicles_df)
+    vehicle_csv_used = VEHICLE_CSV_PATH if os.path.exists(VEHICLE_CSV_PATH) else VEHICLE_CSV_FALLBACK
+
+    st.markdown(
+        """
+<style>
+/* Ajuste visual / responsivo */
+div[data-testid="stHorizontalBlock"] { gap: 1rem; flex-wrap: wrap; }
+/* Inputs con alto consistente */
+div[data-baseweb="input"] > div { min-height: 42px; }
+</style>
+        """.strip(),
+        unsafe_allow_html=True,
+    )
+
+    colA, colB = st.columns([2, 1], gap="large")
+
+    data = PlanData()
+
+    with colB:
+        if st.button("Limpiar formulario"):
+            for key in list(st.session_state.keys()):
+                del st.session_state[key]
+            st.experimental_rerun()
+
+        st.subheader("Encabezado")
+        data.empresa_nombre = st.text_input("Nombre de la empresa", value=DEFAULT_COMPANY_NAME)
+        data.doc_code = st.text_input("Código documento", value=DEFAULT_DOC_CODE)
+        data.doc_rev = st.text_input("Revisión", value=DEFAULT_REV)
+        data.doc_date = st.text_input("Fecha documento", value=DEFAULT_DOC_DATE)
+
+        # Logo: si existe en assets, úsalo por defecto; si el usuario sube uno, guardarlo para próximos PDFs.
+        try:
+            if os.path.exists(DEFAULT_LOGO_PATH) and data.empresa_logo_bytes is None:
+                with open(DEFAULT_LOGO_PATH, "rb") as f:
+                    data.empresa_logo_bytes = f.read()
+                data.empresa_logo_mime = "image/png"
+        except Exception:
+            pass
+
+        logo = st.file_uploader("Logo (opcional)", type=["png", "jpg", "jpeg"])
+        if logo is not None:
+            logo_bytes = logo.read()
+            data.empresa_logo_bytes = logo_bytes
+            data.empresa_logo_mime = logo.type
+            try:
+                os.makedirs(os.path.dirname(DEFAULT_LOGO_PATH), exist_ok=True)
+                with open(DEFAULT_LOGO_PATH, "wb") as f:
+                    f.write(logo_bytes)
+            except Exception:
+                # Si no se puede guardar, igual lo usamos para este PDF.
+                pass
+            st.image(data.empresa_logo_bytes, caption="Logo cargado", width="stretch")
+
+        st.subheader("Datos rápidos (catálogo)")
+        if st.button(
+            "Recargar BD y catálogos",
+            help="Ejecuta esto después de guardar cambios en BD.csv o en el archivo de vehículos. "
+            "Limpia la caché y vuelve a leer los archivos.",
+        ):
+            st.cache_data.clear()
+            st.experimental_rerun()
+        st.write(f"Personas en BD: **{len(people_df)}**")
+        _bd_path = _resolved_person_csv_path()
+        st.write(f"Archivo fuente: `{_bd_path}`")
+        if os.path.abspath(_bd_path) != os.path.abspath(PERSON_CSV_PATH):
+            st.caption(f"Variable `{PERSON_CSV_ENV}` redefine la ruta (por defecto `{PERSON_CSV_PATH}`).")
+        st.caption(
+            f"Tras editar el CSV, usa **Recargar BD** o recarga la página. "
+            f"Hasta **{_max_tecnicos_viaje()}** técnicos por viaje "
+            f"(cambia con `{MAX_TECNICOS_ENV}` en el sistema, 1–20)."
+        )
+        st.write(f"Vehículos en BD: **{len(vehicles_df)}**")
+        st.write(f"Archivo vehículos: `{vehicle_csv_used}`")
+
+        st.subheader("Ubicaciones (opcional)")
+        _xlsx_here = _ruta_excel_codificacion()
+        st.caption(
+            f"**Recomendado:** coloca **`{UBICACIONES_XLSX_PRIMARY}`** en esta carpeta (codificación DPA / INEC). "
+            f"Alternativa: **`{UBICACIONES_CSV_PATH}`**. "
+            f"También puedes subir un **.xlsx** o **.csv** aquí. "
+            f"Hoja Excel: variable de entorno `{UBICACIONES_SHEET_ENV}` (por defecto la primera hoja)."
+        )
+        if _xlsx_here:
+            st.write(f"Detectado en disco: `{_xlsx_here}`")
+        ubi_upload = st.file_uploader(
+            "Subir Excel (CODIFICACIÓN) o CSV de ubicaciones",
+            type=["csv", "xlsx"],
+            key="ubicaciones_file_upload",
+        )
+        if ubi_upload is not None:
+            try:
+                name_l = ubi_upload.name.lower()
+                raw_data = ubi_upload.read()
+                if name_l.endswith(".xlsx"):
+                    raw = _leer_excel_ubicaciones_bytes(raw_data)
+                else:
+                    raw = pd.read_csv(io.BytesIO(raw_data), dtype=str, keep_default_na=False)
+                norm = _normalize_ubicaciones_df(raw)
+                if norm is not None:
+                    st.session_state.ubicaciones_df = norm
+                    st.success(f"Cargado en memoria: **{len(norm)}** filas.")
+                else:
+                    st.error(
+                        "No se detectaron columnas de provincia / cantón / parroquia. "
+                        "Revisa que el archivo tenga nombres o códigos DPA reconocibles."
+                    )
+            except Exception as ex:
+                st.error(f"No se pudo leer el archivo: {ex}")
+        ubi_n = st.session_state.get("ubicaciones_df")
+        if ubi_n is not None and not getattr(ubi_n, "empty", True):
+            st.write(f"Filas activas: **{len(ubi_n)}**")
+        if st.button("Usar solo texto (sin lista)", help="Quita la lista y vuelve a escribir origen/destino a mano"):
+            st.session_state.ubicaciones_df = None
+            st.experimental_rerun()
+
+    ubi_df: pd.DataFrame | None = st.session_state.get("ubicaciones_df")
+
+    with colA:
+        header_left, header_right = st.columns([1, 3], vertical_alignment="center")
+        with header_left:
+            if data.empresa_logo_bytes:
+                st.image(data.empresa_logo_bytes, width="stretch")
+        with header_right:
+            st.title(f"PLAN DE GESTIÓN DE VIAJE — {data.empresa_nombre}".strip())
+            st.caption(
+                "Formulario para viajes >300 km (ida y vuelta), >4 horas, o con riesgos particulares. "
+                "Completa y luego exporta a PDF."
+            )
+
+        # Fuera del st.form: al cambiar un selectbox el script debe re-ejecutarse para autollenar
+        # celular/cédula. Dentro de un form eso no ocurre hasta presionar "Generar PDF".
+        st.subheader("1. Datos generales")
+        col_tecnicos, col_meta = st.columns([3, 2])
+        with col_tecnicos:
+            _mx = _max_tecnicos_viaje()
+            n_tecnicos = st.number_input(
+                "Cantidad de técnicos en el viaje",
+                min_value=1,
+                max_value=_mx,
+                value=min(2, _mx),
+                step=1,
+                help=f"Un selector por cada técnico (máx. {_mx} en esta instalación).",
+            )
+            n_tecnicos = int(n_tecnicos)
+            conductores_nombres: list[str] = []
+            conductores_ced: list[str] = []
+            conductores_tel: list[str] = []
+            tec_opts = _opciones_con_manual(people_opts)
+            for i in range(n_tecnicos):
+                if i:
+                    st.divider()
+                sel = st.selectbox(
+                    f"Técnico {i + 1}",
+                    tec_opts,
+                    index=0,
+                    key=f"conductor_sel_{i}",
+                )
+                manual = sel == PERSON_SEL_OTRO_MANUAL
+                m_n = st.text_input(
+                    "Nombre completo (si «Otro»)",
+                    key=f"conductor_manual_nom_{i}",
+                    disabled=not manual,
+                )
+                m_id = st.text_input(
+                    "Cédula (si «Otro»)",
+                    key=f"conductor_manual_ced_{i}",
+                    disabled=not manual,
+                )
+                m_cel = st.text_input(
+                    "Celular (si «Otro»)",
+                    key=f"conductor_manual_cel_{i}",
+                    disabled=not manual,
+                )
+                d = _person_lookup(people_df, sel) if not manual else {"name": "", "cel": "", "id": ""}
+                c_a, c_b = st.columns(2)
+                with c_a:
+                    st.caption("Celular")
+                    cel_show = (m_cel or "").strip() if manual else (d.get("cel") or "")
+                    st.markdown(f"**{cel_show or '—'}**")
+                with c_b:
+                    st.caption("Cédula")
+                    id_show = (m_id or "").strip() if manual else (d.get("id") or "")
+                    st.markdown(f"**{id_show or '—'}**")
+                if manual:
+                    nom = (m_n or "").strip()
+                    if nom:
+                        conductores_nombres.append(nom)
+                        conductores_ced.append((m_id or "").strip())
+                        conductores_tel.append((m_cel or "").strip())
+                elif sel != "—":
+                    conductores_nombres.append(d["name"])
+                    conductores_ced.append(d["id"])
+                    conductores_tel.append(d["cel"])
+            data.conductores = conductores_nombres
+            data.cedulas_conductores = conductores_ced
+            data.celulares_conductores = conductores_tel
+        with col_meta:
+            data.fecha_elab = st.date_input("Fecha de Elaboración", value=date.today())
+            data.cargo = st.text_input("Cargo / Posición", value="Técnico de Operaciones")
+
+        st.markdown("##### Origen y destino")
+        st.caption(
+            "Con un CSV de provincia / cantón / parroquia verás listas en cascada. "
+            "Sin archivo, puedes escribir el texto a mano."
+        )
+        u_o, u_d = st.columns(2)
+        with u_o:
+            data.origen = _ubicacion_campo(ubi_df, "Punto de origen", "origen")
+        with u_d:
+            data.destino = _ubicacion_campo(ubi_df, "Destino", "destino")
+
+        # Vehículo y emergencias fuera del form: el selector debe actualizar placa/teléfono al instante
+        g3, g4 = st.columns(2)
+        with g3:
+            veh_sel = st.selectbox("Vehículo (desde BD) (opcional)", vehicles_opts, index=0)
+            veh = _vehicle_lookup(vehicles_df, veh_sel)
+            data.placa = st.text_input("Placa del Vehículo", value=veh["placa"])
+            data.tipo_vehiculo = st.text_input("Tipo de Vehículo", value=veh["tipo"])
+        with g4:
+            data.modelo_anio = st.text_input("Modelo / Año", value=veh["modelo_anio"])
+
+        st.caption(
+            "Contactos de emergencia: atajos **Santiago** / **David**, **cualquier persona de la BD**, "
+            "o **Otro** para escribir nombre y teléfono a mano."
+        )
+        e1_otro_nombre, e1_otro_tel = "", ""
+        e2_otro_nombre, e2_otro_tel = "", ""
+        e1_bd_pick, e2_bd_pick = "", ""
+        emc1, emc2 = st.columns(2)
+        with emc1:
+            e1_choice = st.selectbox("Contacto de Emergencia (1)", EMERGENCY_SELECT_OPTIONS, index=0, key="em1_choice")
+            if e1_choice in EMERGENCY_PRESET_TO_BD_NAME:
+                _p1 = _person_lookup(people_df, EMERGENCY_PRESET_TO_BD_NAME[e1_choice])
+                st.caption("Teléfono (Emergencia 1)")
+                st.markdown(f"**{_p1['cel'] or '—'}**")
+            elif e1_choice == EMERGENCY_FROM_BD:
+                bd_em1 = [p for p in people_opts if p != "—"]
+                e1_bd_pick = st.selectbox(
+                    "Persona en BD (Emergencia 1)",
+                    ["—"] + bd_em1,
+                    index=0,
+                    key="em1_bd_pick",
+                )
+                _p1b = _person_lookup(people_df, e1_bd_pick) if e1_bd_pick != "—" else {"cel": ""}
+                st.caption("Teléfono (Emergencia 1)")
+                st.markdown(f"**{_p1b['cel'] or '—'}**")
+            elif e1_choice == EMERGENCY_OTRO_TEXTO:
+                e1_otro_nombre = st.text_input("Nombre completo (Emergencia 1)", key="em1_otro_nombre")
+                e1_otro_tel = st.text_input("Teléfono (Emergencia 1)", key="em1_otro_tel")
+        with emc2:
+            e2_choice = st.selectbox("Contacto de Emergencia (2)", EMERGENCY_SELECT_OPTIONS, index=0, key="em2_choice")
+            if e2_choice in EMERGENCY_PRESET_TO_BD_NAME:
+                _p2 = _person_lookup(people_df, EMERGENCY_PRESET_TO_BD_NAME[e2_choice])
+                st.caption("Teléfono (Emergencia 2)")
+                st.markdown(f"**{_p2['cel'] or '—'}**")
+            elif e2_choice == EMERGENCY_FROM_BD:
+                bd_em2 = [p for p in people_opts if p != "—"]
+                e2_bd_pick = st.selectbox(
+                    "Persona en BD (Emergencia 2)",
+                    ["—"] + bd_em2,
+                    index=0,
+                    key="em2_bd_pick",
+                )
+                _p2b = _person_lookup(people_df, e2_bd_pick) if e2_bd_pick != "—" else {"cel": ""}
+                st.caption("Teléfono (Emergencia 2)")
+                st.markdown(f"**{_p2b['cel'] or '—'}**")
+            elif e2_choice == EMERGENCY_OTRO_TEXTO:
+                e2_otro_nombre = st.text_input("Nombre completo (Emergencia 2)", key="em2_otro_nombre")
+                e2_otro_tel = st.text_input("Teléfono (Emergencia 2)", key="em2_otro_tel")
+
+        data.emergencia_1, data.tel_emergencia_1 = _resolve_emergency_contact(
+            e1_choice,
+            e1_otro_nombre if e1_choice == EMERGENCY_OTRO_TEXTO else "",
+            e1_otro_tel if e1_choice == EMERGENCY_OTRO_TEXTO else "",
+            people_df,
+            bd_pick_name=e1_bd_pick if e1_choice == EMERGENCY_FROM_BD else "",
+        )
+        data.emergencia_2, data.tel_emergencia_2 = _resolve_emergency_contact(
+            e2_choice,
+            e2_otro_nombre if e2_choice == EMERGENCY_OTRO_TEXTO else "",
+            e2_otro_tel if e2_choice == EMERGENCY_OTRO_TEXTO else "",
+            people_df,
+            bd_pick_name=e2_bd_pick if e2_choice == EMERGENCY_FROM_BD else "",
+        )
+
+        with st.form("plan_form", clear_on_submit=False):
+            st.subheader("2. Planificación de viaje")
+            p1, p2 = st.columns(2)
+            with p1:
+                data.empresa = st.text_input("Empresa", value="")
+                data.orden_trabajo = st.text_input("Orden de Trabajo", value="")
+                data.fecha_salida = st.date_input("Fecha de Salida", value=date.today(), key="fecha_salida")
+                _hs = st.time_input(
+                    "Hora de Salida",
+                    value=time(17, 0),
+                    step=300,
+                    key="hora_salida_picker",
+                )
+                data.hora_salida = _format_hora_plan(_hs)
+                data.distancia_km = st.text_input("Distancia Total (km)", value="")
+            with p2:
+                data.fecha_llegada = st.date_input(
+                    "Fecha Estimada de Llegada", value=date.today(), key="fecha_llegada"
+                )
+                _hl = st.time_input(
+                    "Hora Estimada de Llegada",
+                    value=time(20, 0),
+                    step=300,
+                    key="hora_llegada_picker",
+                )
+                data.hora_llegada = _format_hora_plan(_hl)
+                data.duracion_horas = st.text_input("Duración Estimada (horas)", value="")
+                data.condiciones_camino = st.selectbox(
+                    "Condiciones del camino", ["—", "Asfalto", "Lastre", "Mixto", "Otro"], index=1
+                )
+
+            data.observaciones = st.text_area("Observaciones adicionales", height=90, value="")
+
+            st.markdown("**APP International SOS** *(opcional: texto y/o captura de lo que muestra la app)*")
+            data.international_sos_text = st.text_area(
+                "Notas o resumen (International SOS)",
+                height=80,
+                value="",
+                placeholder="Ej.: nivel de riesgo, recomendaciones, enlace o comentario breve…",
+            )
+            sos_img = st.file_uploader(
+                "Captura de pantalla o imagen desde la app (PNG/JPG)",
+                type=["png", "jpg", "jpeg"],
+                key="international_sos_uploader",
+            )
+            sos_img_bytes = sos_img.read() if sos_img is not None else None
+            if sos_img_bytes:
+                st.image(sos_img_bytes, caption="Vista previa International SOS", width="stretch")
+
+            data.proposito = st.text_area("Propósito del viaje", height=120, value="")
+
+            st.subheader("3. Paradas planificadas (IDA)")
+            st.caption("Edita la tabla. Puedes agregar filas (IDA) desde la tabla.")
+            paradas_ida_df = st.data_editor(
+                st.session_state.paradas_ida,
+                width="stretch",
+                num_rows="dynamic",
+                key="paradas_ida_editor",
+            )
+
+            st.subheader("4. Peligros conocidos (marca con X)")
+            ph1, ph2, ph3 = st.columns(3)
+            with ph1:
+                data.peligro_lluvia = st.checkbox("Lluvia")
+                data.peligro_niebla = st.checkbox("Niebla")
+            with ph2:
+                data.peligro_nieve_hielo = st.checkbox("Nieve / hielo")
+                data.peligro_nocturna = st.checkbox("Conducción nocturna")
+            with ph3:
+                data.peligro_carretera_mala = st.checkbox("Carreteras en mal estado")
+                data.peligro_delincuencia = st.checkbox("Zona de alta delincuencia")
+
+            data.otros_peligros = st.text_area("Otros peligros / detalles adicionales", height=90, value="")
+
+            st.subheader("Ruta para tomar (imagen)")
+            ruta = st.file_uploader("Sube captura de Google Maps/Waze (PNG/JPG)", type=["png", "jpg", "jpeg"])
+            ruta_bytes = ruta.read() if ruta is not None else None
+            if ruta_bytes:
+                st.image(ruta_bytes, caption="Ruta cargada", width="stretch")
+
+            st.subheader("Pasajeros (IDA)")
+            pasajeros_ida_sel = st.multiselect(
+                "Selecciona pasajeros (IDA) (opcional)",
+                options=[p for p in people_opts if p != "—"],
+                default=[],
+            )
+            pasajeros_ida_extra = st.text_input(
+                "Otros pasajeros (IDA) no en la lista — separar con coma o una línea por nombre",
+                value="",
+                key="pasajeros_ida_extra",
+            )
+            data.pasajeros_ida = _merge_passenger_lists(
+                [p for p in pasajeros_ida_sel if p and p != "—"],
+                pasajeros_ida_extra,
+            )
+            if data.pasajeros_ida:
+                st.caption(f"Cantidad de pasajeros (IDA): {len(data.pasajeros_ida)}")
+
+            st.subheader("5. Viaje de Vuelta")
+            vuelta_con_horas = st.checkbox(
+                "Definir horas de vuelta (reloj)",
+                value=False,
+                key="vuelta_horas_chk",
+                help="Si no marcas esto, las horas de vuelta quedan en blanco en el PDF (como antes).",
+            )
+            v1, v2 = st.columns(2)
+            with v1:
+                data.vuelta_fecha_salida = st.date_input(
+                    "Fecha de salida (VUELTA)", value=date.today(), key="vuelta_fecha_salida"
+                )
+                if vuelta_con_horas:
+                    _vs = st.time_input(
+                        "Hora de salida (VUELTA)",
+                        value=time(8, 0),
+                        step=300,
+                        key="vuelta_hora_salida_picker",
+                    )
+                    data.vuelta_hora_salida = _format_hora_plan(_vs)
+                else:
+                    data.vuelta_hora_salida = ""
+            with v2:
+                data.vuelta_fecha_llegada = st.date_input(
+                    "Fecha estimada de llegada (VUELTA)", value=date.today(), key="vuelta_fecha_llegada"
+                )
+                if vuelta_con_horas:
+                    _vl = st.time_input(
+                        "Hora estimada de llegada (VUELTA)",
+                        value=time(18, 0),
+                        step=300,
+                        key="vuelta_hora_llegada_picker",
+                    )
+                    data.vuelta_hora_llegada = _format_hora_plan(_vl)
+                else:
+                    data.vuelta_hora_llegada = ""
+
+            st.subheader("Ruta para tomar (imagen) (VUELTA)")
+            ruta_vuelta = st.file_uploader(
+                "Sube captura de Google Maps/Waze (VUELTA) (PNG/JPG)",
+                type=["png", "jpg", "jpeg"],
+                key="ruta_vuelta_uploader",
+            )
+            ruta_vuelta_bytes = ruta_vuelta.read() if ruta_vuelta is not None else None
+            if ruta_vuelta_bytes:
+                st.image(ruta_vuelta_bytes, caption="Ruta vuelta cargada", width="stretch")
+
+            st.subheader("Pasajeros (VUELTA)")
+            pasajeros_vuelta_sel = st.multiselect(
+                "Selecciona pasajeros (VUELTA) (opcional)",
+                options=[p for p in people_opts if p != "—"],
+                default=[],
+            )
+            pasajeros_vuelta_extra = st.text_input(
+                "Otros pasajeros (VUELTA) no en la lista — separar con coma o una línea por nombre",
+                value="",
+                key="pasajeros_vuelta_extra",
+            )
+            data.pasajeros_vuelta = _merge_passenger_lists(
+                [p for p in pasajeros_vuelta_sel if p and p != "—"],
+                pasajeros_vuelta_extra,
+            )
+            if data.pasajeros_vuelta:
+                st.caption(f"Cantidad de pasajeros (VUELTA): {len(data.pasajeros_vuelta)}")
+
+            st.subheader("Paradas planificadas (VUELTA)")
+            st.caption("Edita la tabla. Si no aplica, déjala vacía.")
+            paradas_vuelta_df = st.data_editor(
+                st.session_state.paradas_vuelta,
+                width="stretch",
+                num_rows="dynamic",
+                key="paradas_vuelta_editor",
+            )
+
+            st.subheader("6. Aprobación")
+            firma_opts = _opciones_con_manual(people_opts)
+            ap1, ap2 = st.columns(2)
+            with ap1:
+                data.firma_elabora = st.text_input(
+                    "Firma responsable elaboración plan", value="Cristina Aguirre"
+                )
+                fc1_sel = st.selectbox("Firma conductor responsable (1)", firma_opts, index=0)
+                fc1_man = st.text_input(
+                    "Nombre completo (conductor 1)",
+                    key="firma_c1_manual",
+                    disabled=fc1_sel != PERSON_SEL_OTRO_MANUAL,
+                )
+                data.firma_conductor_1 = _valor_firma(fc1_sel, fc1_man)
+                fc2_sel = st.selectbox("Firma conductor responsable (2)", firma_opts, index=0)
+                fc2_man = st.text_input(
+                    "Nombre completo (conductor 2)",
+                    key="firma_c2_manual",
+                    disabled=fc2_sel != PERSON_SEL_OTRO_MANUAL,
+                )
+                data.firma_conductor_2 = _valor_firma(fc2_sel, fc2_man)
+            with ap2:
+                fa1_sel = st.selectbox("Firma responsable de aprobación (1)", firma_opts, index=0)
+                fa1_man = st.text_input(
+                    "Nombre completo (aprueba 1)",
+                    key="firma_a1_manual",
+                    disabled=fa1_sel != PERSON_SEL_OTRO_MANUAL,
+                )
+                data.firma_aprueba_1 = _valor_firma(fa1_sel, fa1_man)
+                fa2_sel = st.selectbox("Firma responsable de aprobación (2)", firma_opts, index=0)
+                fa2_man = st.text_input(
+                    "Nombre completo (aprueba 2)",
+                    key="firma_a2_manual",
+                    disabled=fa2_sel != PERSON_SEL_OTRO_MANUAL,
+                )
+                data.firma_aprueba_2 = _valor_firma(fa2_sel, fa2_man)
+                data.fecha_firma = st.date_input("Fecha (firmas)", value=date.today())
+
+            st.divider()
+            gen_col1, gen_col2 = st.columns([1, 2])
+            with gen_col1:
+                filename = st.text_input(
+                    "Nombre del archivo PDF", value=f"PLAN_GESTION_VIAJE_{date.today().isoformat()}.pdf"
+                )
+            with gen_col2:
+                st.caption(
+                    "Al generar, se descargará el PDF. Opcionalmente se guarda en una carpeta "
+                    "(local o de red) en el equipo donde corre el servidor Streamlit."
+                )
+
+            save_to_folder = st.checkbox("Guardar copia en carpeta (local o red)", value=True)
+            st.text_input(
+                "Carpeta destino del PDF (opcional)",
+                key="shared_pdf_folder",
+                placeholder=r"Ej: \\Servidor\Compartido\PlanesViaje  o  P:\Planes",
+                help=(
+                    "Ruta accesible **desde el PC que ejecuta Streamlit** (no desde el navegador). "
+                    "Puede ser una carpeta de red ya mapeada o una ruta UNC. "
+                    "Si queda vacía, se guarda en la carpeta de trabajo del servidor. "
+                    f"También puedes definir la variable de entorno {PDF_OUTPUT_DIR_ENV}."
+                ),
+            )
+
+            submitted = st.form_submit_button("Generar PDF", type="primary")
+
+        if submitted:
+            st.session_state.paradas_ida = paradas_ida_df
+            st.session_state.paradas_vuelta = paradas_vuelta_df
+            data.paradas_ida = _df_to_stops(paradas_ida_df)
+            data.paradas_vuelta = _df_to_stops(paradas_vuelta_df)
+            data.ruta_imagen_bytes = ruta_bytes
+            data.ruta_vuelta_imagen_bytes = ruta_vuelta_bytes
+            data.international_sos_imagen_bytes = sos_img_bytes
+            data.international_sos_imagen_mime = sos_img.type if sos_img is not None else None
+
+            pdf_bytes = build_plan_pdf(data)
+            if save_to_folder:
+                base_name = os.path.basename(
+                    filename if filename.lower().endswith(".pdf") else f"{filename}.pdf"
+                )
+                dest_dir = (st.session_state.get("shared_pdf_folder") or "").strip()
+                try:
+                    if dest_dir:
+                        os.makedirs(dest_dir, exist_ok=True)
+                        out_path = os.path.join(dest_dir, base_name)
+                    else:
+                        out_path = base_name
+                    with open(out_path, "wb") as f:
+                        f.write(pdf_bytes)
+                    st.success(f"Guardado en: {os.path.abspath(out_path)}")
+                except Exception as e:
+                    st.warning(f"No se pudo guardar en carpeta: {e}")
+            st.download_button(
+                "Descargar PDF",
+                data=pdf_bytes,
+                file_name=filename if filename.lower().endswith(".pdf") else f"{filename}.pdf",
+                mime="application/pdf",
+            )
+
+        st.caption("Tip: el PDF solo se genera cuando presionas Generar PDF.")
+
+
+if __name__ == "__main__":
+    main()
+

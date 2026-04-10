@@ -1,0 +1,10 @@
+# Ajustes para que la app responda más rápido al interactuar.
+# Documentación: https://docs.streamlit.io/library/advanced-features/configuration
+
+[runner]
+# Optimiza re-ejecuciones cuando la versión de Streamlit lo soporta.
+fastReruns = true
+
+[server]
+# Evita abrir el navegador automáticamente si ejecutas en servidor (opcional).
+# headless = true
