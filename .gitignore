@@ -1,4 +1,9 @@
 .venv/
 __pycache__/
 .streamlit/secrets.toml
+credenciales.json
 *.pdf
+python -m venv .venv
+.\.venv\Scripts\Activate.ps1
+pip install -r requirements.txt
+streamlit run app.py

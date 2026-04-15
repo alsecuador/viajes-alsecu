@@ -1,27 +1,66 @@
 from __future__ import annotations
 
 import io
+import json
 import os
 import re
+import uuid
 from dataclasses import dataclass, field
 from datetime import date, datetime, time
 from typing import Any, Literal
 
+import gspread
 import pandas as pd
 import streamlit as st
 from dateutil import parser as date_parser
+from google.oauth2.service_account import Credentials
 
 from pdf_builder import build_plan_pdf
 
 
-PERSON_CSV_PATH = "BD.csv"
-# Ruta alternativa del CSV de personal (misma estructura). Ej.: PLAN_BD_CSV=\\servidor\recursos\BD.csv
-PERSON_CSV_ENV = "PLAN_BD_CSV"
+# Google Sheets (BD personal y vehículos). Por defecto estos IDs; en local: variables de entorno;
+# en Streamlit Cloud: mismas claves en st.secrets (ver _env_or_secret).
+_DEFAULT_GSHEET_BD_ID = "11VHaoJ9dTgaudt1iVQF8F165QRyZqg0Px283e-efLBs"
+_DEFAULT_GSHEET_VEHICLES_ID = "1eA57He7G5rWNQO9be7nERaCd1vMNv9Tx_zxEroBG1-A"
+
+
+def _env_or_secret(key: str, default: str = "") -> str:
+    """Variable de entorno o clave de primer nivel en st.secrets (p. ej. Streamlit Community Cloud)."""
+    v = (os.environ.get(key) or "").strip()
+    if v:
+        return v
+    try:
+        if key in st.secrets:
+            return str(st.secrets[key]).strip()
+    except Exception:
+        pass
+    return (default or "").strip()
+
+
+def _gsheet_bd_spreadsheet_id() -> str:
+    return _env_or_secret("PLAN_BD_SPREADSHEET_ID", _DEFAULT_GSHEET_BD_ID) or _DEFAULT_GSHEET_BD_ID
+
+
+def _gsheet_vehicles_spreadsheet_id() -> str:
+    return (
+        _env_or_secret("PLAN_VEHICLES_SPREADSHEET_ID", _DEFAULT_GSHEET_VEHICLES_ID)
+        or _DEFAULT_GSHEET_VEHICLES_ID
+    )
+
+
+def _gsheet_ubicaciones_spreadsheet_id() -> str:
+    return _env_or_secret("PLAN_UBICACIONES_SPREADSHEET_ID", "")
+
+# Hoja / índice de worksheet (0 = primera hoja, o nombre exacto del tab).
+PLAN_BD_WORKSHEET_ENV = "PLAN_BD_WORKSHEET"
+PLAN_VEHICLES_WORKSHEET_ENV = "PLAN_VEHICLES_WORKSHEET"
+PLAN_UBICACIONES_WORKSHEET_ENV = "PLAN_UBICACIONES_WORKSHEET"
+
+# Credenciales: en producción usar st.secrets (ver _load_service_account_dict). Local: credenciales.json
+CREDENTIALS_JSON_PATH = (os.environ.get("PLAN_CREDENTIALS_JSON") or "credenciales.json").strip()
+
 # Máximo de técnicos por viaje (1–20). Por defecto 10. Ej.: PLAN_MAX_TECNICOS=12
 MAX_TECNICOS_ENV = "PLAN_MAX_TECNICOS"
-# Preferir Camionetas.csv (Placa, Modelo, Color); si no existe, BD_CAMIONETAS.csv (PLACA, TIPO, MODELO_ANIO)
-VEHICLE_CSV_PATH = "Camionetas.csv"
-VEHICLE_CSV_FALLBACK = "BD_CAMIONETAS.csv"
 DEFAULT_COMPANY_NAME = "ALS ECUADOR"
 DEFAULT_LOGO_PATH = os.path.join("assets", "als_logo.png")
 DEFAULT_DOC_CODE = "RU-40"
@@ -58,6 +97,34 @@ PERSON_SEL_OTRO_MANUAL = "Otro (no está en BD — escribir datos)"
 
 # Técnicos / conductores en el viaje (máximo por defecto; ver _max_tecnicos_viaje())
 MAX_TECNICOS_VIAJE_DEFAULT = 10
+STOP_MOTIVO_OPTIONS = [
+    "Logistica",
+    "Combustible",
+    "Descanso",
+    "Monitoreo",
+    "Retiro de companero",
+    "Envio encomiendas",
+    "Descanso y combustible",
+    "Alimentacion (desayuno)",
+    "Alimentacion (almuerzo)",
+    "Alimentacion (merienda)",
+]
+STOP_TIEMPO_MIN_OPTIONS = [5, 10, 15, 20, 30, 45, 60, 120, 240]
+
+
+def _coerce_tiempo_min(val: Any) -> int:
+    if val in STOP_TIEMPO_MIN_OPTIONS:
+        return int(val)
+    s = str(val or "").strip()
+    if not s:
+        return STOP_TIEMPO_MIN_OPTIONS[0]
+    try:
+        n = int(float(s))
+    except ValueError:
+        return STOP_TIEMPO_MIN_OPTIONS[0]
+    if n in STOP_TIEMPO_MIN_OPTIONS:
+        return n
+    return STOP_TIEMPO_MIN_OPTIONS[0]
 
 
 def _resolve_emergency_contact(
@@ -135,13 +202,8 @@ def _format_hora_plan(t: time) -> str:
     return f"{t.hour}h{t.minute:02d}"
 
 
-def _resolved_person_csv_path() -> str:
-    p = (os.environ.get(PERSON_CSV_ENV) or "").strip()
-    return p if p else PERSON_CSV_PATH
-
-
 def _max_tecnicos_viaje() -> int:
-    raw = (os.environ.get(MAX_TECNICOS_ENV) or "").strip()
+    raw = _env_or_secret(MAX_TECNICOS_ENV).strip()
     if raw.isdigit():
         return max(1, min(20, int(raw)))
     return MAX_TECNICOS_VIAJE_DEFAULT
@@ -163,14 +225,139 @@ def _pick_csv_column(df: pd.DataFrame, candidates: list[str]) -> str | None:
     return None
 
 
-def _read_person_csv_raw(path: str) -> pd.DataFrame:
-    """Lee BD de personal con UTF-8 (con o sin BOM) y cabeceras flexibles."""
+def _parse_worksheet_spec(raw: str | None) -> str | int:
+    """Índice 0-based (string numérico) o título de pestaña."""
+    s = (raw or "").strip()
+    if not s:
+        return 0
+    if s.isdigit():
+        return int(s)
+    return s
+
+
+def _bd_worksheet_spec() -> str | int:
+    return _parse_worksheet_spec(_env_or_secret(PLAN_BD_WORKSHEET_ENV))
+
+
+def _vehicles_worksheet_spec() -> str | int:
+    return _parse_worksheet_spec(_env_or_secret(PLAN_VEHICLES_WORKSHEET_ENV))
+
+
+def _ubicaciones_gsheet_worksheet_spec() -> str | int:
+    return _parse_worksheet_spec(_env_or_secret(PLAN_UBICACIONES_WORKSHEET_ENV))
+
+
+def _load_service_account_dict() -> dict[str, Any]:
+    """
+    Credenciales de cuenta de servicio para gspread.
+    Orden: bloque en st.secrets → JSON en raíz de secrets → archivo credenciales.json → GOOGLE_APPLICATION_CREDENTIALS.
+    """
     try:
-        df = pd.read_csv(path, dtype=str, keep_default_na=False, encoding="utf-8-sig")
-    except UnicodeDecodeError:
-        df = pd.read_csv(path, dtype=str, keep_default_na=False, encoding="latin-1")
-    df.columns = [str(c).strip() for c in df.columns]
-    return df
+        sec = st.secrets
+        for block_name in ("google_service_account", "gspread", "credenciales", "service_account"):
+            if block_name in sec:
+                block = sec[block_name]
+                d = {k: block[k] for k in block.keys()}
+                if d.get("type") == "service_account":
+                    return d
+        if sec.get("type") == "service_account":
+            return {k: sec[k] for k in sec.keys()}
+    except Exception:
+        pass
+    for path in (
+        CREDENTIALS_JSON_PATH,
+        (os.environ.get("GOOGLE_APPLICATION_CREDENTIALS") or "").strip(),
+    ):
+        if path and os.path.isfile(path):
+            with open(path, encoding="utf-8") as f:
+                data = json.load(f)
+            if isinstance(data, dict) and data.get("type") == "service_account":
+                return data
+    raise RuntimeError(
+        "No hay credenciales de Google: defínelas en st.secrets (cuenta de servicio) o en "
+        f"`{CREDENTIALS_JSON_PATH}` / GOOGLE_APPLICATION_CREDENTIALS."
+    )
+
+
+@st.cache_resource(show_spinner=False)
+def _gspread_client() -> gspread.Client:
+    scopes = (
+        "https://www.googleapis.com/auth/spreadsheets",
+        "https://www.googleapis.com/auth/drive",
+    )
+    info = _load_service_account_dict()
+    creds = Credentials.from_service_account_info(info, scopes=scopes)
+    return gspread.authorize(creds)
+
+
+def _open_worksheet(spreadsheet_id: str, worksheet: str | int) -> gspread.Worksheet:
+    gc = _gspread_client()
+    sh = gc.open_by_key(spreadsheet_id)
+    if isinstance(worksheet, int):
+        ws = sh.get_worksheet(worksheet)
+        if ws is None:
+            raise ValueError(f"Worksheet index {worksheet} no existe en {spreadsheet_id!r}")
+        return ws
+    if isinstance(worksheet, str) and worksheet.isdigit():
+        ws = sh.get_worksheet(int(worksheet))
+        if ws is None:
+            raise ValueError(f"Worksheet index {worksheet} no existe en {spreadsheet_id!r}")
+        return ws
+    return sh.worksheet(worksheet)
+
+
+def _worksheet_to_dataframe(ws: gspread.Worksheet) -> pd.DataFrame:
+    vals = ws.get_all_values()
+    if not vals:
+        return pd.DataFrame()
+    header = [str(h).strip() for h in vals[0]]
+    data = vals[1:]
+    if not header:
+        return pd.DataFrame()
+    if not data:
+        return pd.DataFrame(columns=header)
+    ncols = len(header)
+    padded: list[list[str]] = []
+    for row in data:
+        cells = [str(c) if c is not None else "" for c in row]
+        if len(cells) < ncols:
+            cells = cells + [""] * (ncols - len(cells))
+        else:
+            cells = cells[:ncols]
+        padded.append(cells)
+    df = pd.DataFrame(padded, columns=header)
+    return df.fillna("").astype(str)
+
+
+def _dataframe_to_worksheet(ws: gspread.Worksheet, df: pd.DataFrame) -> None:
+    """Sustituye el contenido de la hoja por el DataFrame (cabecera + filas)."""
+    ws.clear()
+    if df.empty:
+        headers = [str(c) for c in df.columns]
+        ws.update([headers], value_input_option="USER_ENTERED")
+        return
+    headers = [str(c) for c in df.columns]
+    body_df = df.fillna("").astype(str).replace({"<NA>": "", "nan": ""})
+    rows = body_df.values.tolist()
+    all_rows = [headers] + rows
+    ws.update(all_rows, value_input_option="USER_ENTERED")
+
+
+def gsheet_write_dataframe(spreadsheet_id: str, worksheet: str | int, df: pd.DataFrame) -> None:
+    """Escribe un DataFrame a una pestaña de Google Sheets (API pública para mantener paridad con to_csv/to_excel)."""
+    ws = _open_worksheet(spreadsheet_id, worksheet)
+    _dataframe_to_worksheet(ws, df)
+
+
+def gsheet_read_dataframe(spreadsheet_id: str, worksheet: str | int) -> pd.DataFrame:
+    ws = _open_worksheet(spreadsheet_id, worksheet)
+    return _worksheet_to_dataframe(ws)
+
+
+def _prepare_raw_person_df(raw: pd.DataFrame) -> pd.DataFrame:
+    raw = raw.copy()
+    raw.columns = [str(c).strip() for c in raw.columns]
+    return raw
 
 
 def _coerce_people_dataframe(raw: pd.DataFrame) -> pd.DataFrame:
@@ -215,36 +402,32 @@ def _coerce_people_dataframe(raw: pd.DataFrame) -> pd.DataFrame:
 
 
 @st.cache_data(show_spinner=False)
-def _cached_load_people(path: str, _mtime: float, _size: int) -> pd.DataFrame:
-    """Cache por ruta + mtime + tamaño: detecta cualquier guardado del CSV."""
+def _cached_load_people_gsheet(_spreadsheet_id: str, _worksheet: str | int) -> pd.DataFrame:
+    """Lee BD de personal desde Google Sheets (caché por id de libro + pestaña)."""
+    if not _spreadsheet_id:
+        return pd.DataFrame(columns=["APELLIDOS Y NOMBRES", "CELULAR", "C. IDENTIDAD"])
     try:
-        raw = _read_person_csv_raw(path)
+        ws = _open_worksheet(_spreadsheet_id, _worksheet)
+        raw = _prepare_raw_person_df(_worksheet_to_dataframe(ws))
         return _coerce_people_dataframe(raw)
     except Exception:
         return pd.DataFrame(columns=["APELLIDOS Y NOMBRES", "CELULAR", "C. IDENTIDAD"])
 
 
 def _load_people() -> pd.DataFrame:
-    path = _resolved_person_csv_path()
-    if not os.path.isfile(path):
-        return pd.DataFrame(columns=["APELLIDOS Y NOMBRES", "CELULAR", "C. IDENTIDAD"])
-    st_info = os.stat(path)
-    return _cached_load_people(path, st_info.st_mtime, st_info.st_size)
+    return _cached_load_people_gsheet(_gsheet_bd_spreadsheet_id(), _bd_worksheet_spec())
 
 
-@st.cache_data(show_spinner=False)
-def _cached_load_vehicles(path: str, _mtime: float) -> pd.DataFrame:
+def _coerce_vehicles_dataframe(df: pd.DataFrame) -> pd.DataFrame:
     """
-    BD de camionetas/vehículos (cacheada).
+    Normaliza hoja de vehículos (misma lógica que antes con CSV).
 
-    - Camionetas.csv: PLACA, MODELO, COLOR (tipo por defecto: Camioneta)
-    - BD_CAMIONETAS.csv: PLACA, TIPO, MODELO_ANIO
+    - Columnas tipo Camionetas: PLACA, MODELO, COLOR (tipo por defecto: Camioneta)
+    - O: PLACA, TIPO, MODELO_ANIO
     """
-    try:
-        df = pd.read_csv(path)
-    except Exception:
+    if df is None or df.empty:
         return pd.DataFrame(columns=["PLACA", "TIPO", "MODELO_ANIO"])
-
+    df = df.copy()
     df.columns = [c.strip().upper() for c in df.columns]
     if "PLACA" not in df.columns:
         return pd.DataFrame(columns=["PLACA", "TIPO", "MODELO_ANIO"])
@@ -274,11 +457,20 @@ def _cached_load_vehicles(path: str, _mtime: float) -> pd.DataFrame:
     return out
 
 
-def _load_vehicles() -> pd.DataFrame:
-    path = VEHICLE_CSV_PATH if os.path.exists(VEHICLE_CSV_PATH) else VEHICLE_CSV_FALLBACK
-    if not os.path.isfile(path):
+@st.cache_data(show_spinner=False)
+def _cached_load_vehicles_gsheet(_spreadsheet_id: str, _worksheet: str | int) -> pd.DataFrame:
+    if not _spreadsheet_id:
         return pd.DataFrame(columns=["PLACA", "TIPO", "MODELO_ANIO"])
-    return _cached_load_vehicles(path, os.path.getmtime(path))
+    try:
+        ws = _open_worksheet(_spreadsheet_id, _worksheet)
+        raw = _worksheet_to_dataframe(ws)
+        return _coerce_vehicles_dataframe(raw)
+    except Exception:
+        return pd.DataFrame(columns=["PLACA", "TIPO", "MODELO_ANIO"])
+
+
+def _load_vehicles() -> pd.DataFrame:
+    return _cached_load_vehicles_gsheet(_gsheet_vehicles_spreadsheet_id(), _vehicles_worksheet_spec())
 
 
 def _vehicle_options(df: pd.DataFrame) -> list[str]:
@@ -415,14 +607,42 @@ class PlanData:
     ruta_vuelta_imagen_mime: str | None = None
 
 
+def _ensure_stop_columns(df: pd.DataFrame) -> pd.DataFrame:
+    """Asegura columnas esperadas para editar paradas."""
+    if df is None:
+        df = pd.DataFrame()
+    out = df.copy()
+    if "Motivo" not in out.columns:
+        out["Motivo"] = ""
+    if "Motivo (Otros)" in out.columns:
+        # Compatibilidad con sesiones anteriores: unifica texto libre en la celda principal.
+        out["Motivo"] = out["Motivo"].fillna("").astype(str).str.strip()
+        otros = out["Motivo (Otros)"].fillna("").astype(str).str.strip()
+        mask = out["Motivo"].eq("") & otros.ne("")
+        out.loc[mask, "Motivo"] = otros[mask]
+        out = out.drop(columns=["Motivo (Otros)"])
+    return out
+
+
 def _init_state():
     if "paradas_ida" not in st.session_state:
         st.session_state.paradas_ida = pd.DataFrame(
             [{"N°": 1, "Lugar / Ciudad": "", "Motivo": "", "Tiempo (min)": ""}]
         )
+    else:
+        st.session_state.paradas_ida = _ensure_stop_columns(st.session_state.paradas_ida)
     if "paradas_vuelta" not in st.session_state:
         st.session_state.paradas_vuelta = pd.DataFrame(
             columns=["N°", "Lugar / Ciudad", "Motivo", "Tiempo (min)"]
+        )
+    else:
+        st.session_state.paradas_vuelta = _ensure_stop_columns(st.session_state.paradas_vuelta)
+    if "paradas_ida_rows" not in st.session_state:
+        migrated_ida = _stops_df_to_ui_rows(_ensure_stop_columns(st.session_state.paradas_ida))
+        st.session_state.paradas_ida_rows = migrated_ida if migrated_ida else [_new_parada_row(1)]
+    if "paradas_vuelta_rows" not in st.session_state:
+        st.session_state.paradas_vuelta_rows = _stops_df_to_ui_rows(
+            _ensure_stop_columns(st.session_state.paradas_vuelta)
         )
     if "shared_pdf_folder" not in st.session_state:
         st.session_state.shared_pdf_folder = os.environ.get(PDF_OUTPUT_DIR_ENV, "")
@@ -616,6 +836,17 @@ def _cached_norm_ubicaciones_csv(path: str, _mtime: float) -> pd.DataFrame | Non
 def _load_ubicaciones_desde_archivo_local() -> None:
     if st.session_state.get("ubicaciones_df") is not None:
         return
+    _ubi_id = _gsheet_ubicaciones_spreadsheet_id()
+    if _ubi_id:
+        try:
+            ws = _open_worksheet(_ubi_id, _ubicaciones_gsheet_worksheet_spec())
+            raw = _worksheet_to_dataframe(ws)
+            norm = _normalize_ubicaciones_df(raw)
+            if norm is not None:
+                st.session_state.ubicaciones_df = norm
+                return
+        except Exception:
+            pass
     xlsx_path = _ruta_excel_codificacion()
     if xlsx_path and os.path.isfile(xlsx_path):
         norm = _cached_norm_ubicaciones_excel(xlsx_path, os.path.getmtime(xlsx_path))
@@ -679,6 +910,152 @@ def _df_to_stops(df: pd.DataFrame) -> list[Stop]:
     return out
 
 
+def _parada_motivo_catalog_index(motivo_catalogo: str) -> int:
+    try:
+        return STOP_MOTIVO_OPTIONS.index(motivo_catalogo)
+    except ValueError:
+        return 0
+
+
+def _new_parada_row(n: int) -> dict[str, Any]:
+    return {
+        "id": str(uuid.uuid4()),
+        "n": n,
+        "lugar": "",
+        "motivo_catalogo": STOP_MOTIVO_OPTIONS[0],
+        "motivo_libre": "",
+        "tiempo_min": STOP_TIEMPO_MIN_OPTIONS[0],
+    }
+
+
+def _stops_df_to_ui_rows(df: pd.DataFrame) -> list[dict[str, Any]]:
+    df = _ensure_stop_columns(df)
+    if df.empty:
+        return []
+    out: list[dict[str, Any]] = []
+    for _, r in df.iterrows():
+        n_raw = str(r.get("N°") or "").strip()
+        try:
+            n = int(float(n_raw)) if n_raw else len(out) + 1
+        except Exception:
+            n = len(out) + 1
+        motivo_final = str(r.get("Motivo") or "").strip()
+        if motivo_final in STOP_MOTIVO_OPTIONS:
+            cat, libre = motivo_final, ""
+        else:
+            cat, libre = STOP_MOTIVO_OPTIONS[0], motivo_final
+        out.append(
+            {
+                "id": str(uuid.uuid4()),
+                "n": n,
+                "lugar": str(r.get("Lugar / Ciudad") or "").strip(),
+                "motivo_catalogo": cat,
+                "motivo_libre": libre,
+                "tiempo_min": _coerce_tiempo_min(r.get("Tiempo (min)")),
+            }
+        )
+    return out
+
+
+def _paradas_widget_state_to_df(prefix: str, rows: list[dict[str, Any]]) -> pd.DataFrame:
+    if not rows:
+        return pd.DataFrame(columns=["N°", "Lugar / Ciudad", "Motivo", "Tiempo (min)"])
+    recs: list[dict[str, Any]] = []
+    for row in rows:
+        rid = row["id"]
+        n_raw = st.session_state.get(f"{prefix}_n_{rid}", row.get("n", ""))
+        try:
+            n = int(float(n_raw))
+        except (TypeError, ValueError):
+            n = 0
+        lugar = str(st.session_state.get(f"{prefix}_lugar_{rid}", row.get("lugar", "")) or "").strip()
+        cat = st.session_state.get(
+            f"{prefix}_cat_{rid}", row.get("motivo_catalogo", STOP_MOTIVO_OPTIONS[0])
+        )
+        libre = str(
+            st.session_state.get(f"{prefix}_libre_{rid}", row.get("motivo_libre", "")) or ""
+        ).strip()
+        tiempo_raw = st.session_state.get(
+            f"{prefix}_tiempo_{rid}", row.get("tiempo_min", STOP_TIEMPO_MIN_OPTIONS[0])
+        )
+        tiempo = str(_coerce_tiempo_min(tiempo_raw))
+        cat_s = str(cat or "").strip()
+        motivo = libre if libre else cat_s
+        recs.append(
+            {"N°": n, "Lugar / Ciudad": lugar, "Motivo": motivo, "Tiempo (min)": tiempo}
+        )
+    return pd.DataFrame(recs)
+
+
+def _render_paradas_form_block(
+    *,
+    subheader: str,
+    caption: str,
+    rows_key: str,
+    prefix: str,
+    count_label: str,
+    min_rows: int,
+    max_rows: int = 40,
+) -> None:
+    st.subheader(subheader)
+    st.caption(caption)
+    rows: list[dict[str, Any]] = st.session_state[rows_key]
+    n_paradas = st.number_input(
+        count_label,
+        min_value=min_rows,
+        max_value=max_rows,
+        value=max(min_rows, len(rows)) if min_rows > 0 else len(rows),
+        step=1,
+        key=f"{prefix}_paradas_count",
+        help="Aumenta o disminuye cuántas filas de paradas se muestran (las últimas se quitan al bajar el número).",
+    )
+    n_paradas = int(n_paradas)
+    while len(rows) > n_paradas:
+        rows.pop()
+    while len(rows) < n_paradas:
+        rows.append(_new_parada_row(len(rows) + 1))
+
+    for idx, row in enumerate(rows):
+        rid = row["id"]
+        st.markdown(f"**Parada {idx + 1}**")
+        c0, c1, c2, c3, c4 = st.columns([0.55, 1.65, 1.45, 1.85, 0.85], gap="small")
+        with c0:
+            st.number_input(
+                "N°",
+                min_value=1,
+                value=int(row.get("n", idx + 1) or idx + 1),
+                step=1,
+                key=f"{prefix}_n_{rid}",
+            )
+        with c1:
+            st.text_input(
+                "Lugar / Ciudad",
+                value=str(row.get("lugar", "")),
+                key=f"{prefix}_lugar_{rid}",
+            )
+        with c2:
+            st.selectbox(
+                "Motivo (lista)",
+                options=STOP_MOTIVO_OPTIONS,
+                index=_parada_motivo_catalog_index(str(row.get("motivo_catalogo", ""))),
+                key=f"{prefix}_cat_{rid}",
+            )
+        with c3:
+            st.text_input(
+                "O escribir otro motivo",
+                value=str(row.get("motivo_libre", "")),
+                key=f"{prefix}_libre_{rid}",
+                placeholder="Si escribes aquí, sustituye a la opción de la lista",
+            )
+        with c4:
+            st.selectbox(
+                "Tiempo (min)",
+                options=STOP_TIEMPO_MIN_OPTIONS,
+                index=STOP_TIEMPO_MIN_OPTIONS.index(_coerce_tiempo_min(row.get("tiempo_min"))),
+                key=f"{prefix}_tiempo_{rid}",
+            )
+
+
 def main():
     st.set_page_config(page_title="Plan de Gestión de Viaje ALS Ecuador", layout="wide")
     _init_state()
@@ -689,7 +1066,6 @@ def main():
 
     vehicles_df = _load_vehicles()
     vehicles_opts = _vehicle_options(vehicles_df)
-    vehicle_csv_used = VEHICLE_CSV_PATH if os.path.exists(VEHICLE_CSV_PATH) else VEHICLE_CSV_FALLBACK
 
     st.markdown(
         """
@@ -745,31 +1121,39 @@ div[data-baseweb="input"] > div { min-height: 42px; }
         st.subheader("Datos rápidos (catálogo)")
         if st.button(
             "Recargar BD y catálogos",
-            help="Ejecuta esto después de guardar cambios en BD.csv o en el archivo de vehículos. "
-            "Limpia la caché y vuelve a leer los archivos.",
+            help="Ejecuta esto después de editar las hojas de Google Sheets (BD / camionetas). "
+            "Limpia la caché y vuelve a leer desde la nube.",
         ):
             st.cache_data.clear()
+            try:
+                st.cache_resource.clear()
+            except Exception:
+                pass
             st.experimental_rerun()
         st.write(f"Personas en BD: **{len(people_df)}**")
-        _bd_path = _resolved_person_csv_path()
-        st.write(f"Archivo fuente: `{_bd_path}`")
-        if os.path.abspath(_bd_path) != os.path.abspath(PERSON_CSV_PATH):
-            st.caption(f"Variable `{PERSON_CSV_ENV}` redefine la ruta (por defecto `{PERSON_CSV_PATH}`).")
         st.caption(
-            f"Tras editar el CSV, usa **Recargar BD** o recarga la página. "
-            f"Hasta **{_max_tecnicos_viaje()}** técnicos por viaje "
-            f"(cambia con `{MAX_TECNICOS_ENV}` en el sistema, 1–20)."
+            f"Fuente: **Google Sheets** · libro `{_gsheet_bd_spreadsheet_id()}` · pestaña "
+            f"`{_bd_worksheet_spec()}` (`st.secrets` / `{PLAN_BD_WORKSHEET_ENV}`)."
+        )
+        st.caption(
+            f"Credenciales: **st.secrets** (producción) o **`{CREDENTIALS_JSON_PATH}`** / "
+            "`GOOGLE_APPLICATION_CREDENTIALS` (local). "
+            f"Tras editar la hoja, usa **Recargar BD**. "
+            f"Hasta **{_max_tecnicos_viaje()}** técnicos por viaje (`{MAX_TECNICOS_ENV}`, 1–20)."
         )
         st.write(f"Vehículos en BD: **{len(vehicles_df)}**")
-        st.write(f"Archivo vehículos: `{vehicle_csv_used}`")
+        st.caption(
+            f"Fuente: **Google Sheets** · libro `{_gsheet_vehicles_spreadsheet_id()}` · pestaña "
+            f"`{_vehicles_worksheet_spec()}` (`st.secrets` / `{PLAN_VEHICLES_WORKSHEET_ENV}`)."
+        )
 
         st.subheader("Ubicaciones (opcional)")
         _xlsx_here = _ruta_excel_codificacion()
         st.caption(
-            f"**Recomendado:** coloca **`{UBICACIONES_XLSX_PRIMARY}`** en esta carpeta (codificación DPA / INEC). "
-            f"Alternativa: **`{UBICACIONES_CSV_PATH}`**. "
+            f"Opcional: define **`PLAN_UBICACIONES_SPREADSHEET_ID`** para cargar DPA desde Google Sheets. "
+            f"Si no, se usa **`{UBICACIONES_XLSX_PRIMARY}`** / **`{UBICACIONES_CSV_PATH}`** en esta carpeta. "
             f"También puedes subir un **.xlsx** o **.csv** aquí. "
-            f"Hoja Excel: variable de entorno `{UBICACIONES_SHEET_ENV}` (por defecto la primera hoja)."
+            f"Hoja Excel local: variable `{UBICACIONES_SHEET_ENV}` (índice o nombre)."
         )
         if _xlsx_here:
             st.write(f"Detectado en disco: `{_xlsx_here}`")
@@ -1001,9 +1385,21 @@ div[data-baseweb="input"] > div { min-height: 42px; }
                 )
                 data.hora_llegada = _format_hora_plan(_hl)
                 data.duracion_horas = st.text_input("Duración Estimada (horas)", value="")
-                data.condiciones_camino = st.selectbox(
-                    "Condiciones del camino", ["—", "Asfalto", "Lastre", "Mixto", "Otro"], index=1
+                condiciones_camino_opts = [
+                    "Asfalto",
+                    "Lastre",
+                    "Mixto",
+                    "Tierra",
+                    "Caminos de segundo orden",
+                    "Otro",
+                ]
+                condiciones_camino_sel = st.multiselect(
+                    "Condiciones del camino",
+                    condiciones_camino_opts,
+                    default=["Asfalto"],
+                    help="Puedes seleccionar una o varias condiciones.",
                 )
+                data.condiciones_camino = ", ".join(condiciones_camino_sel) if condiciones_camino_sel else "—"
 
             data.observaciones = st.text_area("Observaciones adicionales", height=90, value="")
 
@@ -1025,13 +1421,16 @@ div[data-baseweb="input"] > div { min-height: 42px; }
 
             data.proposito = st.text_area("Propósito del viaje", height=120, value="")
 
-            st.subheader("3. Paradas planificadas (IDA)")
-            st.caption("Edita la tabla. Puedes agregar filas (IDA) desde la tabla.")
-            paradas_ida_df = st.data_editor(
-                st.session_state.paradas_ida,
-                width="stretch",
-                num_rows="dynamic",
-                key="paradas_ida_editor",
+            _render_paradas_form_block(
+                subheader="3. Paradas planificadas (IDA)",
+                caption=(
+                    "Motivo: elige una opción de la lista o escribe en «O escribir otro motivo» "
+                    "(el texto escrito tiene prioridad). Usa el número de paradas para agregar o quitar filas."
+                ),
+                rows_key="paradas_ida_rows",
+                prefix="ida",
+                count_label="Número de paradas (IDA)",
+                min_rows=1,
             )
 
             st.subheader("4. Peligros conocidos (marca con X)")
@@ -1137,13 +1536,16 @@ div[data-baseweb="input"] > div { min-height: 42px; }
             if data.pasajeros_vuelta:
                 st.caption(f"Cantidad de pasajeros (VUELTA): {len(data.pasajeros_vuelta)}")
 
-            st.subheader("Paradas planificadas (VUELTA)")
-            st.caption("Edita la tabla. Si no aplica, déjala vacía.")
-            paradas_vuelta_df = st.data_editor(
-                st.session_state.paradas_vuelta,
-                width="stretch",
-                num_rows="dynamic",
-                key="paradas_vuelta_editor",
+            _render_paradas_form_block(
+                subheader="Paradas planificadas (VUELTA)",
+                caption=(
+                    "Misma lógica que en IDA. Pon 0 paradas si no aplica. "
+                    "El texto en «O escribir otro motivo» sustituye a la lista si no está vacío."
+                ),
+                rows_key="paradas_vuelta_rows",
+                prefix="vuelta",
+                count_label="Número de paradas (VUELTA)",
+                min_rows=0,
             )
 
             st.subheader("6. Aprobación")
@@ -1212,6 +1614,10 @@ div[data-baseweb="input"] > div { min-height: 42px; }
             submitted = st.form_submit_button("Generar PDF", type="primary")
 
         if submitted:
+            paradas_ida_df = _paradas_widget_state_to_df("ida", st.session_state.paradas_ida_rows)
+            paradas_vuelta_df = _paradas_widget_state_to_df(
+                "vuelta", st.session_state.paradas_vuelta_rows
+            )
             st.session_state.paradas_ida = paradas_ida_df
             st.session_state.paradas_vuelta = paradas_vuelta_df
             data.paradas_ida = _df_to_stops(paradas_ida_df)
