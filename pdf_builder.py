@@ -409,6 +409,14 @@ def build_plan_pdf(plan: Any) -> bytes:
             _hazard_label_paragraph("Zona de alta delincuencia", hazard_label_style),
             _hazard_x_paragraph(bool(getattr(plan, "peligro_delincuencia", False)), hazard_x_style),
         ],
+        [
+            _hazard_label_paragraph("Accidentes de tránsito", hazard_label_style),
+            _hazard_x_paragraph(bool(getattr(plan, "peligro_accidentes_transito", False)), hazard_x_style),
+            _hazard_label_paragraph("", hazard_label_style),
+            _hazard_x_paragraph(False, hazard_x_style),
+            _hazard_label_paragraph("", hazard_label_style),
+            _hazard_x_paragraph(False, hazard_x_style),
+        ],
     ]
     hazards = Table(
         hazard_data,

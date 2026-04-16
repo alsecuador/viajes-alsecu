@@ -575,6 +575,7 @@ class PlanData:
     peligro_nocturna: bool = False
     peligro_carretera_mala: bool = False
     peligro_delincuencia: bool = False
+    peligro_accidentes_transito: bool = False
     otros_peligros: str = ""
     observaciones: str = ""
     international_sos_text: str = ""
@@ -1444,6 +1445,7 @@ div[data-baseweb="input"] > div { min-height: 42px; }
             with ph3:
                 data.peligro_carretera_mala = st.checkbox("Carreteras en mal estado")
                 data.peligro_delincuencia = st.checkbox("Zona de alta delincuencia")
+                data.peligro_accidentes_transito = st.checkbox("Accidentes de tránsito")
 
             data.otros_peligros = st.text_area("Otros peligros / detalles adicionales", height=90, value="")
 
