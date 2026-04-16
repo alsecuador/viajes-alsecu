@@ -1,7 +1,9 @@
 @echo off
 chcp 65001 >nul
-title Plan de Gestión de Viaje — Streamlit
-cd /d "%~dp0"
+title Plan de Gestion de Viaje - Streamlit
+set "URL=http://localhost:8501"
+REM Evitar cd con ruta entre comillas que termina en barra invertida (rompe cmd). Se usa el sufijo .
+cd /d "%~dp0."
 
 if exist ".venv\Scripts\python.exe" (
   set "PY=.venv\Scripts\python.exe"
@@ -11,7 +13,7 @@ if exist ".venv\Scripts\python.exe" (
   echo Usando Python del sistema
 )
 
-REM Si falta Streamlit u otras librerías en este entorno, instalarlas una vez
+REM Si falta Streamlit u otras librerias en este entorno, instalarlas una vez
 "%PY%" -c "import streamlit" 2>nul
 if errorlevel 1 (
   echo.
@@ -24,10 +26,16 @@ if errorlevel 1 (
   )
 )
 
-"%PY%" -m streamlit run app.py
-
-if errorlevel 1 (
-  echo.
-  echo No se pudo iniciar la app.
-  pause
+REM Si la app ya esta corriendo, solo abrir el navegador y salir.
+powershell -NoProfile -Command "try { (Invoke-WebRequest -Uri '%URL%' -UseBasicParsing -TimeoutSec 2) ^| Out-Null; exit 0 } catch { exit 1 }" >nul 2>nul
+if not errorlevel 1 (
+  echo La app ya esta en ejecucion. Abriendo navegador...
+  start "" "%URL%"
+  exit /b 0
 )
+
+REM Iniciar Streamlit en una nueva ventana para no bloquear este lanzador.
+start "Plan de Viaje - Streamlit" "%PY%" -m streamlit run app.py
+timeout /t 3 >nul
+start "" "%URL%"
+exit /b 0
