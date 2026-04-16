@@ -1,34 +1,34 @@
-# Plan de Gestión de Viaje (ALS Ecuador) - Formulario automático
+# Plan de Gestión de Viaje (ALS Ecuador)
 
-Esta carpeta contiene una app local para:
+App **Streamlit** para:
 
-- Llenar el **Plan de Gestión de Viaje** como formulario (con opciones).
-- Autocompletar personas desde `BD.csv`.
-- Exportar el plan final a **PDF**.
+- Completar el **Plan de Gestión de Viaje** como formulario.
+- Personas y vehículos desde **Google Sheets** (gspread).
+- Exportar el plan a **PDF**.
 
 ## Requisitos
 
-- Python 3.10+ instalado en Windows
+- Python 3.10+
 
-## Instalación
-
-En PowerShell, dentro de esta carpeta:
+## Instalación (local)
 
 ```bash
 python -m venv .venv
-.\.venv\Scripts\Activate.ps1
+# Windows: .\.venv\Scripts\Activate.ps1
 pip install -r requirements.txt
 ```
 
-## Ejecutar
+## Ejecutar (local)
 
 ```bash
 streamlit run app.py
 ```
 
-Al final usa el botón **Generar PDF** para descargarlo.
+Credenciales Google: archivo `credenciales.json` en la carpeta del proyecto **o** variables en `.streamlit/secrets.toml` (no subir al repositorio).
 
-## Datos
+## Despliegue (Streamlit Cloud)
 
-- `BD.csv`: base de personas (nombre, celular, cédula).
-
+- Repositorio en GitHub.
+- **Main file:** `app.py`.
+- **Secrets** en el panel de la app: bloque `[google_service_account]` con la cuenta de servicio.
+- Compartir las hojas de cálculo con el `client_email` de esa cuenta.
