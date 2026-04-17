@@ -20,8 +20,8 @@ from pdf_builder import build_plan_pdf
 
 # Google Sheets (BD personal y vehículos). Por defecto estos IDs; en local: variables de entorno;
 # en Streamlit Cloud: mismas claves en st.secrets (ver _env_or_secret).
-_DEFAULT_GSHEET_BD_ID = "11VHaoJ9dTgaudt1iVQF8F165QRyZqg0Px283e-efLBs"
-_DEFAULT_GSHEET_VEHICLES_ID = "1eA57He7G5rWNQO9be7nERaCd1vMNv9Tx_zxEroBG1-A"
+_DEFAULT_GSHEET_BD_ID = "18QdZarvALNmq0NPG1XNaxE-Gwv9iHnNcrGsELuWUsfA"
+_DEFAULT_GSHEET_VEHICLES_ID = "1ZnUoIG--aGTtUC54pp_UJqQOm0d2ERfAc64XqhPy_yY"
 
 
 def _env_or_secret(key: str, default: str = "") -> str:
@@ -1169,7 +1169,7 @@ def _render_paradas_form_block(
 
 
 # --- Diagnóstico temporal Streamlit Cloud / Google Sheets (quitar cuando ya no haga falta) ---
-_DIAG_SHEET_BD_ID = "11VHaoJ9dTgaudt1iVQF8F165QRyZqg0Px283e-efLBs"
+_DIAG_SHEET_BD_ID = "18QdZarvALNmq0NPG1XNaxE-Gwv9iHnNcrGsELuWUsfA"
 _GSHEET_SCOPES = (
     "https://www.googleapis.com/auth/spreadsheets",
     "https://www.googleapis.com/auth/drive",
