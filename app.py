@@ -70,6 +70,12 @@ DEFAULT_DOC_DATE = "08-09-2025"
 # Carpeta por defecto para guardar PDFs (compartida en red). Sobrescribible en la app o con variable de entorno.
 PDF_OUTPUT_DIR_ENV = "PLAN_PDF_OUTPUT_DIR"
 
+# Google Drive: copia automática de cada PDF (misma cuenta de servicio que Sheets).
+# Carpeta dentro del padre (por defecto «root» = Drive de la cuenta de servicio).
+PLAN_DRIVE_FOLDER_NAME_ENV = "PLAN_DRIVE_FOLDER_NAME"
+PLAN_DRIVE_PARENT_FOLDER_ID_ENV = "PLAN_DRIVE_PARENT_FOLDER_ID"
+DEFAULT_DRIVE_PLANS_FOLDER_NAME = "Planes de Viaje ALS"
+
 # Ubicaciones Ecuador: provincia → cantón → parroquia
 # Prioridad: Excel oficial CODIFICACIÓN_2025.xlsx (misma carpeta que la app), luego ubicaciones.csv
 UBICACIONES_XLSX_PRIMARY = "CODIFICACIÓN_2025.xlsx"
@@ -288,6 +294,111 @@ def _gspread_client() -> gspread.Client:
     info = _load_service_account_dict()
     creds = Credentials.from_service_account_info(info, scopes=scopes)
     return gspread.authorize(creds)
+
+
+def _google_drive_scopes() -> tuple[str, ...]:
+    return (
+        "https://www.googleapis.com/auth/spreadsheets",
+        "https://www.googleapis.com/auth/drive",
+    )
+
+
+@st.cache_resource(show_spinner=False)
+def _drive_service_v3():
+    from googleapiclient.discovery import build
+
+    info = _load_service_account_dict()
+    creds = Credentials.from_service_account_info(info, scopes=_google_drive_scopes())
+    return build("drive", "v3", credentials=creds, cache_discovery=False)
+
+
+def _drive_plans_folder_name() -> str:
+    n = _env_or_secret(PLAN_DRIVE_FOLDER_NAME_ENV, DEFAULT_DRIVE_PLANS_FOLDER_NAME).strip()
+    return n or DEFAULT_DRIVE_PLANS_FOLDER_NAME
+
+
+def _drive_parent_folder_id() -> str:
+    pid = _env_or_secret(PLAN_DRIVE_PARENT_FOLDER_ID_ENV, "").strip()
+    return pid if pid else "root"
+
+
+def _drive_escape_query_name(name: str) -> str:
+    return name.replace("\\", "\\\\").replace("'", "\\'")
+
+
+def _ensure_drive_subfolder(service: Any, parent_id: str, folder_name: str) -> str:
+    safe = _drive_escape_query_name(folder_name)
+    q = (
+        f"name = '{safe}' and mimeType = 'application/vnd.google-apps.folder' "
+        f"and '{parent_id}' in parents and trashed = false"
+    )
+    res = (
+        service.files()
+        .list(
+            q=q,
+            spaces="drive",
+            fields="files(id, name)",
+            pageSize=10,
+            supportsAllDrives=True,
+            includeItemsFromAllDrives=True,
+        )
+        .execute()
+    )
+    found = res.get("files") or []
+    if found:
+        return str(found[0]["id"])
+    body = {
+        "name": folder_name,
+        "mimeType": "application/vnd.google-apps.folder",
+        "parents": [parent_id],
+    }
+    created = (
+        service.files()
+        .create(body=body, fields="id", supportsAllDrives=True)
+        .execute()
+    )
+    return str(created["id"])
+
+
+def _upload_pdf_to_google_drive(pdf_bytes: bytes, filename: str) -> tuple[bool, str, str | None]:
+    """
+    Sube el PDF a Google Drive bajo la carpeta configurada (creada si no existe).
+    Devuelve (éxito, mensaje para el usuario, webViewLink o None).
+    """
+    from googleapiclient.http import MediaIoBaseUpload
+
+    base_name = os.path.basename((filename or "").strip() or "plan.pdf")
+    if not base_name.lower().endswith(".pdf"):
+        base_name = f"{base_name}.pdf"
+    try:
+        service = _drive_service_v3()
+        parent_id = _drive_parent_folder_id()
+        folder_name = _drive_plans_folder_name()
+        folder_id = _ensure_drive_subfolder(service, parent_id, folder_name)
+        media = MediaIoBaseUpload(
+            io.BytesIO(pdf_bytes),
+            mimetype="application/pdf",
+            resumable=False,
+        )
+        body = {"name": base_name, "parents": [folder_id]}
+        created = (
+            service.files()
+            .create(
+                body=body,
+                media_body=media,
+                fields="id, name, webViewLink",
+                supportsAllDrives=True,
+            )
+            .execute()
+        )
+        link = created.get("webViewLink")
+        link_s = str(link).strip() if link else None
+        msg = (
+            f"Copia en Google Drive: carpeta «{folder_name}», archivo «{created.get('name', base_name)}»."
+        )
+        return True, msg, link_s
+    except Exception as ex:
+        return False, str(ex), None
 
 
 def _open_worksheet(spreadsheet_id: str, worksheet: str | int) -> gspread.Worksheet:
@@ -1057,8 +1168,141 @@ def _render_paradas_form_block(
             )
 
 
+# --- Diagnóstico temporal Streamlit Cloud / Google Sheets (quitar cuando ya no haga falta) ---
+_DIAG_SHEET_BD_ID = "11VHaoJ9dTgaudt1iVQF8F165QRyZqg0Px283e-efLBs"
+_GSHEET_SCOPES = (
+    "https://www.googleapis.com/auth/spreadsheets",
+    "https://www.googleapis.com/auth/drive",
+)
+
+
+def _secrets_google_service_account_block_present() -> bool:
+    """True si existe la sección [google_service_account] en secrets (Streamlit Cloud)."""
+    try:
+        return "google_service_account" in st.secrets
+    except Exception:
+        return False
+
+
+def _diagnostic_gspread_client_no_cache() -> gspread.Client:
+    """Cliente gspread sin @cache_resource: refleja secrets actuales en cada ejecución."""
+    info = _load_service_account_dict()
+    creds = Credentials.from_service_account_info(info, scopes=_GSHEET_SCOPES)
+    return gspread.authorize(creds)
+
+
+def _render_temp_gsheet_diagnostic_panel() -> None:
+    """Muestra si las credenciales cargan y si se puede leer el libro de BD indicado."""
+    with st.expander("Diagnóstico temporal — Google Sheets (BD)", expanded=True):
+        st.caption(
+            "Bloque temporal para depurar credenciales y acceso al Sheet. "
+            "Quitar la llamada a `_render_temp_gsheet_diagnostic_panel` en `main()` cuando termines."
+        )
+        has_block = _secrets_google_service_account_block_present()
+        if has_block:
+            st.success("**Secrets:** existe el bloque `[google_service_account]` en `st.secrets`.")
+        else:
+            st.warning(
+                "**Secrets:** no aparece el bloque `[google_service_account]` en `st.secrets` "
+                "(la app también acepta `gspread`, `credenciales` o `service_account`, o JSON en raíz)."
+            )
+
+        st.write(f"**Sheet probado (ID fijo):** `{_DIAG_SHEET_BD_ID}`")
+        st.write(
+            f"**ID que usa la app para BD:** `{_gsheet_bd_spreadsheet_id()}` "
+            f"(`PLAN_BD_SPREADSHEET_ID` en secrets / env, o valor por defecto)."
+        )
+        st.write(
+            f"**Pestaña / índice (`PLAN_BD_WORKSHEET`):** `{_bd_worksheet_spec()!r}` "
+            "(vacío = primera hoja, índice `0`)."
+        )
+
+        creds: dict[str, Any] | None = None
+        try:
+            creds = _load_service_account_dict()
+        except Exception as ex:
+            st.error(f"**Credenciales (`_load_service_account_dict`):** fallo — `{type(ex).__name__}: {ex}`")
+            return
+
+        pk = creds.get("private_key") or ""
+        st.success(
+            "**Credenciales:** diccionario de cuenta de servicio leído (sin exponer la clave privada)."
+        )
+        st.json(
+            {
+                "type": creds.get("type"),
+                "project_id": creds.get("project_id"),
+                "client_email": creds.get("client_email"),
+                "private_key_id": creds.get("private_key_id"),
+                "private_key_present": bool(str(pk).strip()),
+            }
+        )
+
+        try:
+            Credentials.from_service_account_info(creds, scopes=_GSHEET_SCOPES)
+            st.success("**Validación OAuth:** `Credentials.from_service_account_info` OK.")
+        except Exception as ex:
+            st.error(f"**Validación OAuth:** fallo — `{type(ex).__name__}: {ex}`")
+            return
+
+        try:
+            gc = _diagnostic_gspread_client_no_cache()
+            sh = gc.open_by_key(_DIAG_SHEET_BD_ID)
+            ws_spec = _bd_worksheet_spec()
+            if isinstance(ws_spec, int):
+                ws = sh.get_worksheet(ws_spec)
+                if ws is None:
+                    raise ValueError(f"Worksheet index {ws_spec} no existe en {_DIAG_SHEET_BD_ID!r}")
+            elif isinstance(ws_spec, str) and ws_spec.isdigit():
+                ws = sh.get_worksheet(int(ws_spec))
+                if ws is None:
+                    raise ValueError(f"Worksheet index {ws_spec} no existe en {_DIAG_SHEET_BD_ID!r}")
+            else:
+                ws = sh.worksheet(ws_spec) if ws_spec else sh.sheet1
+
+            sh_title = sh.title
+            vals = ws.get_all_values()
+            n = len(vals)
+            hdr = [str(h).strip() for h in vals[0]] if vals else []
+            st.success(
+                f"**Conexión al Sheet (ID diagnóstico):** OK — libro «{sh_title}», "
+                f"filas leídas (incl. cabecera): **{n}**."
+            )
+            if hdr:
+                preview = ", ".join(hdr[:25])
+                if len(hdr) > 25:
+                    preview += ", …"
+                st.text(f"Cabeceras (primeras columnas): {preview}")
+            col_probe = _pick_csv_column(
+                _prepare_raw_person_df(_worksheet_to_dataframe(ws)),
+                [
+                    "APELLIDOS Y NOMBRES",
+                    "NOMBRES Y APELLIDOS",
+                    "NOMBRE COMPLETO",
+                    "NOMBRES",
+                    "APELLIDOS NOMBRES",
+                ],
+            )
+            if col_probe:
+                st.info(f"**Columna de nombre detectada** (para técnicos): `{col_probe}`")
+            else:
+                st.warning(
+                    "**Columna de nombre no detectada** con los encabezados esperados "
+                    "(p. ej. «APELLIDOS Y NOMBRES»). La app puede dejar la lista de técnicos vacía."
+                )
+        except Exception as ex:
+            st.error(
+                f"**Conexión al Sheet (ID diagnóstico):** fallo — `{type(ex).__name__}: {ex}`\n\n"
+                "Revisa: hoja compartida con el **client_email** de la cuenta de servicio, "
+                "APIs **Google Sheets** y **Google Drive** habilitadas en el proyecto, "
+                "ID correcto y pestaña (`PLAN_BD_WORKSHEET`)."
+            )
+
+
 def main():
     st.set_page_config(page_title="Plan de Gestión de Viaje ALS Ecuador", layout="wide")
+    _render_temp_gsheet_diagnostic_panel()
+
     _init_state()
     _load_ubicaciones_desde_archivo_local()
 
@@ -1596,8 +1840,9 @@ div[data-baseweb="input"] > div { min-height: 42px; }
                 )
             with gen_col2:
                 st.caption(
-                    "Al generar, se descargará el PDF. Opcionalmente se guarda en una carpeta "
-                    "(local o de red) en el equipo donde corre el servidor Streamlit."
+                    "Al generar, se descarga el PDF y se sube una copia a Google Drive en la carpeta "
+                    f"«{DEFAULT_DRIVE_PLANS_FOLDER_NAME}» (misma cuenta de servicio que Sheets). "
+                    "Opcionalmente también puedes guardar en una carpeta local o de red en el servidor."
                 )
 
             save_to_folder = st.checkbox("Guardar copia en carpeta (local o red)", value=True)
@@ -1630,6 +1875,13 @@ div[data-baseweb="input"] > div { min-height: 42px; }
             data.international_sos_imagen_mime = sos_img.type if sos_img is not None else None
 
             pdf_bytes = build_plan_pdf(data)
+            ok_drive, drive_msg, drive_link = _upload_pdf_to_google_drive(pdf_bytes, filename)
+            if ok_drive:
+                st.success(drive_msg)
+                if drive_link:
+                    st.markdown(f"[Abrir en Google Drive]({drive_link})")
+            else:
+                st.warning(f"No se pudo guardar en Google Drive: {drive_msg}")
             if save_to_folder:
                 base_name = os.path.basename(
                     filename if filename.lower().endswith(".pdf") else f"{filename}.pdf"
