@@ -272,6 +272,9 @@ def build_plan_pdf(plan: Any) -> bytes:
     tels_cond = _join_lines([str(x) for x in cel_list])
     emerg = _join_lines([getattr(plan, "emergencia_1", ""), getattr(plan, "emergencia_2", "")])
     tel_emerg = _join_lines([getattr(plan, "tel_emergencia_1", ""), getattr(plan, "tel_emergencia_2", "")])
+    ced_emerg = _join_lines(
+        [getattr(plan, "cedula_emergencia_1", ""), getattr(plan, "cedula_emergencia_2", "")]
+    )
 
     t1 = _table(
         [
@@ -286,6 +289,7 @@ def build_plan_pdf(plan: Any) -> bytes:
             [_p("Modelo / Año", small_label), _p(str(getattr(plan, "modelo_anio", "") or ""), small_value)],
             [_p("Nombre del Contacto de Emergencia", small_label), _p(emerg, small_value)],
             [_p("Teléfono de Emergencia", small_label), _p(tel_emerg, small_value)],
+            [_p("Cédula de identidad (contacto emergencia)", small_label), _p(ced_emerg, small_value)],
         ],
         col_widths=[6.2 * cm, 11.0 * cm],
         kv_shading=True,

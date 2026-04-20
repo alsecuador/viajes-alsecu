@@ -90,14 +90,14 @@ UBICACIONES_SHEET_ENV = "PLAN_CODIFICACION_SHEET"  # opcional: nombre de hoja Ex
 
 # Contactos de emergencia: atajos con nombre en BD; o cualquier fila de BD; o texto libre
 EMERGENCY_PRESET_TO_BD_NAME: dict[str, str] = {
-    "Santiago Montalvo": "Montalvan Samaniego Santiago Javier",
+    "Santiago Montalvan": "Montalvan Samaniego Santiago Javier",
     "David Solano": "Solano Bazurto David Roberto",
 }
 EMERGENCY_FROM_BD = "Otra persona de la lista (BD)…"
 EMERGENCY_OTRO_TEXTO = "Otro (escribir nombre y teléfono)"
 EMERGENCY_SELECT_OPTIONS = [
     "—",
-    "Santiago Montalvo",
+    "Santiago Montalvan",
     "David Solano",
     EMERGENCY_FROM_BD,
     EMERGENCY_OTRO_TEXTO,
@@ -145,22 +145,21 @@ def _resolve_emergency_contact(
     people_df: pd.DataFrame,
     *,
     bd_pick_name: str = "",
-) -> tuple[str, str]:
-    """Devuelve (nombre_para_pdf, teléfono)."""
+) -> tuple[str, str, str]:
+    """Devuelve (nombre completo para PDF, teléfono, cédula)."""
     if choice == "—":
-        return "", ""
+        return "", "", ""
     if choice in EMERGENCY_PRESET_TO_BD_NAME:
-        nombre_corto = choice
         bd_name = EMERGENCY_PRESET_TO_BD_NAME[choice]
-        tel = _person_lookup(people_df, bd_name)["cel"]
-        return nombre_corto, tel
+        d = _person_lookup(people_df, bd_name)
+        return d["name"], d["cel"], d["id"]
     if choice == EMERGENCY_FROM_BD:
         if not bd_pick_name or bd_pick_name == "—":
-            return "", ""
+            return "", "", ""
         d = _person_lookup(people_df, bd_pick_name)
-        return d["name"], d["cel"]
+        return d["name"], d["cel"], d["id"]
     # Otro (texto libre)
-    return (otro_nombre or "").strip(), (otro_tel or "").strip()
+    return (otro_nombre or "").strip(), (otro_tel or "").strip(), ""
 
 
 def _parse_extra_names(text: str) -> list[str]:
@@ -678,6 +677,8 @@ class PlanData:
     emergencia_2: str = ""
     tel_emergencia_1: str = ""
     tel_emergencia_2: str = ""
+    cedula_emergencia_1: str = ""
+    cedula_emergencia_2: str = ""
 
     # 2. Planificación
     destino: str = ""
@@ -1444,8 +1445,8 @@ div[data-baseweb="input"] > div { min-height: 42px; }
             data.modelo_anio = st.text_input("Modelo / Año", value=veh["modelo_anio"])
 
         st.caption(
-            "Contactos de emergencia: atajos **Santiago** / **David**, **cualquier persona de la BD**, "
-            "o **Otro** para escribir nombre y teléfono a mano."
+            "Contactos de emergencia: atajos **Santiago Montalvan** / **David Solano** (datos desde la BD), "
+            "**cualquier persona de la BD**, o **Otro** para escribir nombre y teléfono a mano."
         )
         e1_otro_nombre, e1_otro_tel = "", ""
         e2_otro_nombre, e2_otro_tel = "", ""
@@ -1457,6 +1458,8 @@ div[data-baseweb="input"] > div { min-height: 42px; }
                 _p1 = _person_lookup(people_df, EMERGENCY_PRESET_TO_BD_NAME[e1_choice])
                 st.caption("Teléfono (Emergencia 1)")
                 st.markdown(f"**{_p1['cel'] or '—'}**")
+                st.caption("Cédula (Emergencia 1)")
+                st.markdown(f"**{_p1['id'] or '—'}**")
             elif e1_choice == EMERGENCY_FROM_BD:
                 bd_em1 = [p for p in people_opts if p != "—"]
                 e1_bd_pick = st.selectbox(
@@ -1465,9 +1468,11 @@ div[data-baseweb="input"] > div { min-height: 42px; }
                     index=0,
                     key="em1_bd_pick",
                 )
-                _p1b = _person_lookup(people_df, e1_bd_pick) if e1_bd_pick != "—" else {"cel": ""}
+                _p1b = _person_lookup(people_df, e1_bd_pick) if e1_bd_pick != "—" else {"cel": "", "id": ""}
                 st.caption("Teléfono (Emergencia 1)")
                 st.markdown(f"**{_p1b['cel'] or '—'}**")
+                st.caption("Cédula (Emergencia 1)")
+                st.markdown(f"**{_p1b.get('id') or '—'}**")
             elif e1_choice == EMERGENCY_OTRO_TEXTO:
                 e1_otro_nombre = st.text_input("Nombre completo (Emergencia 1)", key="em1_otro_nombre")
                 e1_otro_tel = st.text_input("Teléfono (Emergencia 1)", key="em1_otro_tel")
@@ -1477,6 +1482,8 @@ div[data-baseweb="input"] > div { min-height: 42px; }
                 _p2 = _person_lookup(people_df, EMERGENCY_PRESET_TO_BD_NAME[e2_choice])
                 st.caption("Teléfono (Emergencia 2)")
                 st.markdown(f"**{_p2['cel'] or '—'}**")
+                st.caption("Cédula (Emergencia 2)")
+                st.markdown(f"**{_p2['id'] or '—'}**")
             elif e2_choice == EMERGENCY_FROM_BD:
                 bd_em2 = [p for p in people_opts if p != "—"]
                 e2_bd_pick = st.selectbox(
@@ -1485,21 +1492,31 @@ div[data-baseweb="input"] > div { min-height: 42px; }
                     index=0,
                     key="em2_bd_pick",
                 )
-                _p2b = _person_lookup(people_df, e2_bd_pick) if e2_bd_pick != "—" else {"cel": ""}
+                _p2b = _person_lookup(people_df, e2_bd_pick) if e2_bd_pick != "—" else {"cel": "", "id": ""}
                 st.caption("Teléfono (Emergencia 2)")
                 st.markdown(f"**{_p2b['cel'] or '—'}**")
+                st.caption("Cédula (Emergencia 2)")
+                st.markdown(f"**{_p2b.get('id') or '—'}**")
             elif e2_choice == EMERGENCY_OTRO_TEXTO:
                 e2_otro_nombre = st.text_input("Nombre completo (Emergencia 2)", key="em2_otro_nombre")
                 e2_otro_tel = st.text_input("Teléfono (Emergencia 2)", key="em2_otro_tel")
 
-        data.emergencia_1, data.tel_emergencia_1 = _resolve_emergency_contact(
+        (
+            data.emergencia_1,
+            data.tel_emergencia_1,
+            data.cedula_emergencia_1,
+        ) = _resolve_emergency_contact(
             e1_choice,
             e1_otro_nombre if e1_choice == EMERGENCY_OTRO_TEXTO else "",
             e1_otro_tel if e1_choice == EMERGENCY_OTRO_TEXTO else "",
             people_df,
             bd_pick_name=e1_bd_pick if e1_choice == EMERGENCY_FROM_BD else "",
         )
-        data.emergencia_2, data.tel_emergencia_2 = _resolve_emergency_contact(
+        (
+            data.emergencia_2,
+            data.tel_emergencia_2,
+            data.cedula_emergencia_2,
+        ) = _resolve_emergency_contact(
             e2_choice,
             e2_otro_nombre if e2_choice == EMERGENCY_OTRO_TEXTO else "",
             e2_otro_tel if e2_choice == EMERGENCY_OTRO_TEXTO else "",
