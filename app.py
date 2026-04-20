@@ -70,13 +70,6 @@ DEFAULT_DOC_DATE = "08-09-2025"
 # Carpeta por defecto para guardar PDFs (compartida en red). Sobrescribible en la app o con variable de entorno.
 PDF_OUTPUT_DIR_ENV = "PLAN_PDF_OUTPUT_DIR"
 
-# Google Drive: copia automática de cada PDF (misma cuenta de servicio que Sheets).
-# PLAN_DRIVE_PARENT_FOLDER_ID: carpeta en el Drive del usuario (o Shared Drive) compartida con la SA;
-# no usar la raíz de la cuenta de servicio (no tiene cuota de almacenamiento).
-PLAN_DRIVE_FOLDER_NAME_ENV = "PLAN_DRIVE_FOLDER_NAME"
-PLAN_DRIVE_PARENT_FOLDER_ID_ENV = "PLAN_DRIVE_PARENT_FOLDER_ID"
-DEFAULT_DRIVE_PLANS_FOLDER_NAME = "Planes de Viaje ALS"
-
 # Último PDF generado en memoria (para st.download_button tras reruns; Cloud no tiene disco compartido con el usuario).
 SESSION_PLAN_PDF_BYTES = "plan_export_pdf_bytes"
 SESSION_PLAN_PDF_FILENAME = "plan_export_pdf_filename"
@@ -291,129 +284,10 @@ def _load_service_account_dict() -> dict[str, Any]:
 
 @st.cache_resource(show_spinner=False)
 def _gspread_client() -> gspread.Client:
-    scopes = (
-        "https://www.googleapis.com/auth/spreadsheets",
-        "https://www.googleapis.com/auth/drive",
-    )
+    scopes = ("https://www.googleapis.com/auth/spreadsheets",)
     info = _load_service_account_dict()
     creds = Credentials.from_service_account_info(info, scopes=scopes)
     return gspread.authorize(creds)
-
-
-def _google_drive_scopes() -> tuple[str, ...]:
-    return (
-        "https://www.googleapis.com/auth/spreadsheets",
-        "https://www.googleapis.com/auth/drive",
-    )
-
-
-@st.cache_resource(show_spinner=False)
-def _drive_service_v3():
-    from googleapiclient.discovery import build
-
-    info = _load_service_account_dict()
-    creds = Credentials.from_service_account_info(info, scopes=_google_drive_scopes())
-    return build("drive", "v3", credentials=creds, cache_discovery=False)
-
-
-def _drive_plans_folder_name() -> str:
-    n = _env_or_secret(PLAN_DRIVE_FOLDER_NAME_ENV, DEFAULT_DRIVE_PLANS_FOLDER_NAME).strip()
-    return n or DEFAULT_DRIVE_PLANS_FOLDER_NAME
-
-
-def _drive_parent_folder_id() -> str | None:
-    """ID de la carpeta destino en el Drive del usuario (compartida con la cuenta de servicio). Sin valor por defecto «root»."""
-    pid = _env_or_secret(PLAN_DRIVE_PARENT_FOLDER_ID_ENV, "").strip()
-    return pid if pid else None
-
-
-def _drive_escape_query_name(name: str) -> str:
-    return name.replace("\\", "\\\\").replace("'", "\\'")
-
-
-def _ensure_drive_subfolder(service: Any, parent_id: str, folder_name: str) -> str:
-    safe = _drive_escape_query_name(folder_name)
-    q = (
-        f"name = '{safe}' and mimeType = 'application/vnd.google-apps.folder' "
-        f"and '{parent_id}' in parents and trashed = false"
-    )
-    res = (
-        service.files()
-        .list(
-            q=q,
-            spaces="drive",
-            fields="files(id, name)",
-            pageSize=10,
-            supportsAllDrives=True,
-            includeItemsFromAllDrives=True,
-        )
-        .execute()
-    )
-    found = res.get("files") or []
-    if found:
-        return str(found[0]["id"])
-    body = {
-        "name": folder_name,
-        "mimeType": "application/vnd.google-apps.folder",
-        "parents": [parent_id],
-    }
-    created = (
-        service.files()
-        .create(body=body, fields="id", supportsAllDrives=True)
-        .execute()
-    )
-    return str(created["id"])
-
-
-def _upload_pdf_to_google_drive(pdf_bytes: bytes, filename: str) -> tuple[bool, str, str | None]:
-    """
-    Sube el PDF a una carpeta del Drive del usuario (no al «Mi unidad» de la cuenta de servicio).
-
-    Requiere PLAN_DRIVE_PARENT_FOLDER_ID: carpeta de My Drive o de un Shared Drive compartida con la
-    cuenta de servicio (Editor). El archivo consume la cuota del propietario del destino.
-    Devuelve (éxito, mensaje para el usuario, webViewLink o None).
-    """
-    from googleapiclient.http import MediaIoBaseUpload
-
-    base_name = os.path.basename((filename or "").strip() or "plan.pdf")
-    if not base_name.lower().endswith(".pdf"):
-        base_name = f"{base_name}.pdf"
-    parent_id = _drive_parent_folder_id()
-    if not parent_id:
-        return (
-            False,
-            "Falta PLAN_DRIVE_PARENT_FOLDER_ID: comparte una carpeta de tu Google Drive con la cuenta "
-            "de servicio (permiso Editor) y define su ID. Las cuentas de servicio no tienen cuota en su unidad propia.",
-            None,
-        )
-    try:
-        service = _drive_service_v3()
-        folder_name = _drive_plans_folder_name()
-        folder_id = _ensure_drive_subfolder(service, parent_id, folder_name)
-        media = MediaIoBaseUpload(
-            io.BytesIO(pdf_bytes),
-            mimetype="application/pdf",
-            resumable=False,
-        )
-        body = {"name": base_name, "parents": [folder_id]}
-        created = (
-            service.files()
-            .create(
-                body=body,
-                media_body=media,
-                fields="id, name, webViewLink",
-                supportsAllDrives=True,
-            )
-            .execute()
-        )
-        link = created.get("webViewLink")
-        link_s = str(link).strip() if link else None
-        msg = (
-            f"Copia en Google Drive: carpeta «{folder_name}», archivo «{created.get('name', base_name)}»."
-        )
-        return True, msg, link_s
-    except Exception as ex:
-        return False, str(ex), None
 
 
 def _open_worksheet(spreadsheet_id: str, worksheet: str | int) -> gspread.Worksheet:
@@ -1188,26 +1062,6 @@ def _render_paradas_form_block(
 def main():
     st.set_page_config(page_title="Plan de Gestión de Viaje ALS Ecuador", layout="wide")
 
-    # TEMPORAL: depuración — quitar cuando ya no haga falta
-    try:
-        if PLAN_DRIVE_PARENT_FOLDER_ID_ENV in st.secrets:
-            st.write(
-                "**[temporal]** `PLAN_DRIVE_PARENT_FOLDER_ID` en st.secrets:**",
-                str(st.secrets[PLAN_DRIVE_PARENT_FOLDER_ID_ENV]),
-            )
-        else:
-            st.write(
-                f"**[temporal]** `{PLAN_DRIVE_PARENT_FOLDER_ID_ENV}` no está en st.secrets "
-                "(la app puede tomar el valor por variable de entorno)."
-            )
-    except Exception as ex:
-        st.write("**[temporal]** No se pudo leer st.secrets para Drive:", ex)
-    _eff = _drive_parent_folder_id()
-    st.write(
-        "**[temporal]** Valor efectivo para subir PDFs (env tiene prioridad sobre st.secrets):**",
-        _eff if _eff else "(vacío — no se subirá a Drive)",
-    )
-
     _init_state()
     _load_ubicaciones_desde_archivo_local()
 
@@ -1761,9 +1615,8 @@ div[data-baseweb="input"] > div { min-height: 42px; }
                 )
             with gen_col2:
                 st.caption(
-                    "Al generar, se descarga el PDF y se sube una copia a Google Drive en la carpeta "
-                    f"«{DEFAULT_DRIVE_PLANS_FOLDER_NAME}» (misma cuenta de servicio que Sheets). "
-                    "Opcionalmente también puedes guardar en una carpeta local o de red en el servidor."
+                    "Al generar, podrás descargar el PDF en tu equipo. Opcionalmente, en servidores con "
+                    "disco accesible, puedes guardar una copia en una carpeta local o de red."
                 )
 
             save_to_folder = st.checkbox("Guardar copia en carpeta (local o red)", value=True)
@@ -1799,13 +1652,6 @@ div[data-baseweb="input"] > div { min-height: 42px; }
             final_pdf_name = filename if filename.lower().endswith(".pdf") else f"{filename}.pdf"
             st.session_state[SESSION_PLAN_PDF_BYTES] = pdf_bytes
             st.session_state[SESSION_PLAN_PDF_FILENAME] = final_pdf_name
-            ok_drive, drive_msg, drive_link = _upload_pdf_to_google_drive(pdf_bytes, filename)
-            if ok_drive:
-                st.success(drive_msg)
-                if drive_link:
-                    st.markdown(f"[Abrir en Google Drive]({drive_link})")
-            else:
-                st.warning(f"No se pudo guardar en Google Drive: {drive_msg}")
             if save_to_folder:
                 base_name = os.path.basename(final_pdf_name)
                 dest_dir = (st.session_state.get("shared_pdf_folder") or "").strip()
