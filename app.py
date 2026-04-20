@@ -1091,7 +1091,7 @@ div[data-baseweb="input"] > div { min-height: 42px; }
         if st.button("Limpiar formulario"):
             for key in list(st.session_state.keys()):
                 del st.session_state[key]
-            st.experimental_rerun()
+            st.rerun()
 
         st.subheader("Encabezado")
         data.empresa_nombre = st.text_input("Nombre de la empresa", value=DEFAULT_COMPANY_NAME)
@@ -1133,7 +1133,7 @@ div[data-baseweb="input"] > div { min-height: 42px; }
                 st.cache_resource.clear()
             except Exception:
                 pass
-            st.experimental_rerun()
+            st.rerun()
         st.write(f"Personas en BD: **{len(people_df)}**")
         st.caption(
             f"Fuente: **Google Sheets** · libro `{_gsheet_bd_spreadsheet_id()}` · pestaña "
@@ -1190,7 +1190,7 @@ div[data-baseweb="input"] > div { min-height: 42px; }
             st.write(f"Filas activas: **{len(ubi_n)}**")
         if st.button("Usar solo texto (sin lista)", help="Quita la lista y vuelve a escribir origen/destino a mano"):
             st.session_state.ubicaciones_df = None
-            st.experimental_rerun()
+            st.rerun()
 
     ubi_df: pd.DataFrame | None = st.session_state.get("ubicaciones_df")
 
