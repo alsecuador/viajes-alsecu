@@ -71,7 +71,8 @@ DEFAULT_DOC_DATE = "08-09-2025"
 PDF_OUTPUT_DIR_ENV = "PLAN_PDF_OUTPUT_DIR"
 
 # Google Drive: copia automática de cada PDF (misma cuenta de servicio que Sheets).
-# Carpeta dentro del padre (por defecto «root» = Drive de la cuenta de servicio).
+# PLAN_DRIVE_PARENT_FOLDER_ID: carpeta en el Drive del usuario (o Shared Drive) compartida con la SA;
+# no usar la raíz de la cuenta de servicio (no tiene cuota de almacenamiento).
 PLAN_DRIVE_FOLDER_NAME_ENV = "PLAN_DRIVE_FOLDER_NAME"
 PLAN_DRIVE_PARENT_FOLDER_ID_ENV = "PLAN_DRIVE_PARENT_FOLDER_ID"
 DEFAULT_DRIVE_PLANS_FOLDER_NAME = "Planes de Viaje ALS"
@@ -317,9 +318,10 @@ def _drive_plans_folder_name() -> str:
     return n or DEFAULT_DRIVE_PLANS_FOLDER_NAME
 
 
-def _drive_parent_folder_id() -> str:
+def _drive_parent_folder_id() -> str | None:
+    """ID de la carpeta destino en el Drive del usuario (compartida con la cuenta de servicio). Sin valor por defecto «root»."""
     pid = _env_or_secret(PLAN_DRIVE_PARENT_FOLDER_ID_ENV, "").strip()
-    return pid if pid else "root"
+    return pid if pid else None
 
 
 def _drive_escape_query_name(name: str) -> str:
@@ -362,7 +364,10 @@ def _ensure_drive_subfolder(service: Any, parent_id: str, folder_name: str) -> s
 
 def _upload_pdf_to_google_drive(pdf_bytes: bytes, filename: str) -> tuple[bool, str, str | None]:
     """
-    Sube el PDF a Google Drive bajo la carpeta configurada (creada si no existe).
+    Sube el PDF a una carpeta del Drive del usuario (no al «Mi unidad» de la cuenta de servicio).
+
+    Requiere PLAN_DRIVE_PARENT_FOLDER_ID: carpeta de My Drive o de un Shared Drive compartida con la
+    cuenta de servicio (Editor). El archivo consume la cuota del propietario del destino.
     Devuelve (éxito, mensaje para el usuario, webViewLink o None).
     """
     from googleapiclient.http import MediaIoBaseUpload
@@ -370,9 +375,16 @@ def _upload_pdf_to_google_drive(pdf_bytes: bytes, filename: str) -> tuple[bool, 
     base_name = os.path.basename((filename or "").strip() or "plan.pdf")
     if not base_name.lower().endswith(".pdf"):
         base_name = f"{base_name}.pdf"
+    parent_id = _drive_parent_folder_id()
+    if not parent_id:
+        return (
+            False,
+            "Falta PLAN_DRIVE_PARENT_FOLDER_ID: comparte una carpeta de tu Google Drive con la cuenta "
+            "de servicio (permiso Editor) y define su ID. Las cuentas de servicio no tienen cuota en su unidad propia.",
+            None,
+        )
     try:
         service = _drive_service_v3()
-        parent_id = _drive_parent_folder_id()
         folder_name = _drive_plans_folder_name()
         folder_id = _ensure_drive_subfolder(service, parent_id, folder_name)
         media = MediaIoBaseUpload(
