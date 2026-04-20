@@ -77,6 +77,10 @@ PLAN_DRIVE_FOLDER_NAME_ENV = "PLAN_DRIVE_FOLDER_NAME"
 PLAN_DRIVE_PARENT_FOLDER_ID_ENV = "PLAN_DRIVE_PARENT_FOLDER_ID"
 DEFAULT_DRIVE_PLANS_FOLDER_NAME = "Planes de Viaje ALS"
 
+# Último PDF generado en memoria (para st.download_button tras reruns; Cloud no tiene disco compartido con el usuario).
+SESSION_PLAN_PDF_BYTES = "plan_export_pdf_bytes"
+SESSION_PLAN_PDF_FILENAME = "plan_export_pdf_filename"
+
 # Ubicaciones Ecuador: provincia → cantón → parroquia
 # Prioridad: Excel oficial CODIFICACIÓN_2025.xlsx (misma carpeta que la app), luego ubicaciones.csv
 UBICACIONES_XLSX_PRIMARY = "CODIFICACIÓN_2025.xlsx"
@@ -1183,6 +1187,26 @@ def _render_paradas_form_block(
 def main():
     st.set_page_config(page_title="Plan de Gestión de Viaje ALS Ecuador", layout="wide")
 
+    # TEMPORAL: depuración — quitar cuando ya no haga falta
+    try:
+        if PLAN_DRIVE_PARENT_FOLDER_ID_ENV in st.secrets:
+            st.write(
+                "**[temporal]** `PLAN_DRIVE_PARENT_FOLDER_ID` en st.secrets:**",
+                str(st.secrets[PLAN_DRIVE_PARENT_FOLDER_ID_ENV]),
+            )
+        else:
+            st.write(
+                f"**[temporal]** `{PLAN_DRIVE_PARENT_FOLDER_ID_ENV}` no está en st.secrets "
+                "(la app puede tomar el valor por variable de entorno)."
+            )
+    except Exception as ex:
+        st.write("**[temporal]** No se pudo leer st.secrets para Drive:", ex)
+    _eff = _drive_parent_folder_id()
+    st.write(
+        "**[temporal]** Valor efectivo para subir PDFs (env tiene prioridad sobre st.secrets):**",
+        _eff if _eff else "(vacío — no se subirá a Drive)",
+    )
+
     _init_state()
     _load_ubicaciones_desde_archivo_local()
 
@@ -1755,6 +1779,9 @@ div[data-baseweb="input"] > div { min-height: 42px; }
             data.international_sos_imagen_mime = sos_img.type if sos_img is not None else None
 
             pdf_bytes = build_plan_pdf(data)
+            final_pdf_name = filename if filename.lower().endswith(".pdf") else f"{filename}.pdf"
+            st.session_state[SESSION_PLAN_PDF_BYTES] = pdf_bytes
+            st.session_state[SESSION_PLAN_PDF_FILENAME] = final_pdf_name
             ok_drive, drive_msg, drive_link = _upload_pdf_to_google_drive(pdf_bytes, filename)
             if ok_drive:
                 st.success(drive_msg)
@@ -1763,9 +1790,7 @@ div[data-baseweb="input"] > div { min-height: 42px; }
             else:
                 st.warning(f"No se pudo guardar en Google Drive: {drive_msg}")
             if save_to_folder:
-                base_name = os.path.basename(
-                    filename if filename.lower().endswith(".pdf") else f"{filename}.pdf"
-                )
+                base_name = os.path.basename(final_pdf_name)
                 dest_dir = (st.session_state.get("shared_pdf_folder") or "").strip()
                 try:
                     if dest_dir:
@@ -1778,11 +1803,16 @@ div[data-baseweb="input"] > div { min-height: 42px; }
                     st.success(f"Guardado en: {os.path.abspath(out_path)}")
                 except Exception as e:
                     st.warning(f"No se pudo guardar en carpeta: {e}")
+
+        _pdf_dl = st.session_state.get(SESSION_PLAN_PDF_BYTES)
+        _pdf_name_dl = (st.session_state.get(SESSION_PLAN_PDF_FILENAME) or "").strip() or "PLAN_GESTION_VIAJE.pdf"
+        if _pdf_dl is not None:
             st.download_button(
                 "Descargar PDF",
-                data=pdf_bytes,
-                file_name=filename if filename.lower().endswith(".pdf") else f"{filename}.pdf",
+                data=_pdf_dl,
+                file_name=_pdf_name_dl,
                 mime="application/pdf",
+                key="download_plan_pdf_bytes",
             )
 
         st.caption("Tip: el PDF solo se genera cuando presionas Generar PDF.")
