@@ -813,6 +813,30 @@ class PlanData:
     ruta_vuelta_imagen_mime: str | None = None
 
 
+def _safe_pdf_filename_segment(text: str, max_len: int = 80) -> str:
+    """Fragmento seguro para nombre de archivo (Windows: sin \\ / : * ? \" < > |)."""
+    s = (text or "").strip()
+    if not s:
+        return "Viaje"
+    s = re.sub(r'[<>:"/\\|?*\x00-\x1f]', "", s)
+    s = re.sub(r"\s+", "_", s)
+    s = re.sub(r"_+", "_", s).strip("_.")
+    if not s:
+        return "Viaje"
+    return s[:max_len]
+
+
+def _default_plan_pdf_filename(empresa: str, empresa_nombre: str, destino: str, d: date) -> str:
+    """Patrón sugerido: PV_(empresa del viaje | destino | nombre en encabezado)_fecha.pdf."""
+    mid = (
+        (empresa or "").strip()
+        or (destino or "").strip()
+        or (empresa_nombre or "").strip()
+    )
+    slug = _safe_pdf_filename_segment(mid)
+    return f"PV_{slug}_{d.isoformat()}.pdf"
+
+
 def _ensure_stop_columns(df: pd.DataFrame) -> pd.DataFrame:
     """Asegura columnas esperadas para editar paradas."""
     if df is None:
@@ -1881,9 +1905,10 @@ div[data-baseweb="input"] > div { min-height: 42px; }
             st.divider()
             gen_col1, gen_col2 = st.columns([1, 2])
             with gen_col1:
-                filename = st.text_input(
-                    "Nombre del archivo PDF", value=f"PLAN_GESTION_VIAJE_{date.today().isoformat()}.pdf"
+                _default_pdf = _default_plan_pdf_filename(
+                    data.empresa, data.empresa_nombre, data.destino, date.today()
                 )
+                filename = st.text_input("Nombre del archivo PDF", value=_default_pdf)
             with gen_col2:
                 st.caption(
                     "Al generar, podrás descargar el PDF en tu equipo. Opcionalmente, en servidores con "
@@ -1911,7 +1936,9 @@ div[data-baseweb="input"] > div { min-height: 42px; }
             st.session_state[SESSION_PLAN_PDF_BYTES] = pdf_bytes
             st.session_state[SESSION_PLAN_PDF_FILENAME] = final_pdf_name
         _pdf_dl = st.session_state.get(SESSION_PLAN_PDF_BYTES)
-        _pdf_name_dl = (st.session_state.get(SESSION_PLAN_PDF_FILENAME) or "").strip() or "PLAN_GESTION_VIAJE.pdf"
+        _pdf_name_dl = (st.session_state.get(SESSION_PLAN_PDF_FILENAME) or "").strip() or _default_plan_pdf_filename(
+            "", "", "", date.today()
+        )
         if _pdf_dl is not None:
             st.download_button(
                 "Descargar PDF",
