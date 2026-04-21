@@ -695,6 +695,8 @@ def _init_state():
         st.session_state.shared_pdf_folder = os.environ.get(PDF_OUTPUT_DIR_ENV, "")
     if "ubicaciones_df" not in st.session_state:
         st.session_state.ubicaciones_df = None
+    if "ubicaciones_source" not in st.session_state:
+        st.session_state.ubicaciones_source = "Sin datos"
 
 
 def _col_norm(c: Any) -> str:
@@ -891,6 +893,9 @@ def _load_ubicaciones_desde_archivo_local() -> None:
             norm = _normalize_ubicaciones_df(raw)
             if norm is not None:
                 st.session_state.ubicaciones_df = norm
+                st.session_state.ubicaciones_source = (
+                    f"Google Sheets ({_ubi_id}) · pestaña `{_ubicaciones_gsheet_worksheet_spec()}`"
+                )
                 return
         except Exception:
             pass
@@ -899,12 +904,14 @@ def _load_ubicaciones_desde_archivo_local() -> None:
         norm = _cached_norm_ubicaciones_excel(xlsx_path, os.path.getmtime(xlsx_path))
         if norm is not None:
             st.session_state.ubicaciones_df = norm
+            st.session_state.ubicaciones_source = f"Excel local ({os.path.basename(xlsx_path)})"
             return
     if not os.path.isfile(UBICACIONES_CSV_PATH):
         return
     norm = _cached_norm_ubicaciones_csv(UBICACIONES_CSV_PATH, os.path.getmtime(UBICACIONES_CSV_PATH))
     if norm is not None:
         st.session_state.ubicaciones_df = norm
+        st.session_state.ubicaciones_source = f"CSV local ({UBICACIONES_CSV_PATH})"
 
 
 def _ubicacion_campo(df: pd.DataFrame | None, etiqueta: str, key_prefix: str) -> str:
@@ -1221,6 +1228,7 @@ div[data-baseweb="input"] > div { min-height: 42px; }
                 norm = _normalize_ubicaciones_df(raw)
                 if norm is not None:
                     st.session_state.ubicaciones_df = norm
+                    st.session_state.ubicaciones_source = f"Archivo subido ({ubi_upload.name})"
                     st.success(f"Cargado en memoria: **{len(norm)}** filas.")
                 else:
                     st.error(
@@ -1230,10 +1238,13 @@ div[data-baseweb="input"] > div { min-height: 42px; }
             except Exception as ex:
                 st.error(f"No se pudo leer el archivo: {ex}")
         ubi_n = st.session_state.get("ubicaciones_df")
+        ubi_src = (st.session_state.get("ubicaciones_source") or "Sin datos").strip()
+        st.caption(f"Fuente activa de ubicaciones: **{ubi_src}**")
         if ubi_n is not None and not getattr(ubi_n, "empty", True):
             st.write(f"Filas activas: **{len(ubi_n)}**")
         if st.button("Usar solo texto (sin lista)", help="Quita la lista y vuelve a escribir origen/destino a mano"):
             st.session_state.ubicaciones_df = None
+            st.session_state.ubicaciones_source = "Texto manual (sin lista)"
             st.rerun()
 
     ubi_df: pd.DataFrame | None = st.session_state.get("ubicaciones_df")
