@@ -118,16 +118,19 @@ def _section_block(
     title: str,
     *content: Any,
     h_style: ParagraphStyle,
-    gap_title_to_content: float = 7.0,
-    gap_after_section: float = 12.0,
+    gap_title_to_content: float = 6.0,
+    gap_after_section: float = 8.0,
 ) -> list[Any]:
     """
-    Arma una sección con separación cómoda manteniendo título + primer bloque juntos.
-    El resto de contenido puede fluir en página siguiente si es largo.
+    Título + espacio bajo el título en un KeepTogether pequeño (evita título huérfano).
+    El primer bloque (p. ej. tabla grande) va aparte para que pueda partirse entre páginas;
+    si estuviera dentro del mismo KeepTogether que el título, al no caber en el resto de la
+    página ReportLab enviaría todo el bloque a la página siguiente y dejaría mucho hueco.
     """
     first = content[0] if content else Spacer(1, 1)
     out: list[Any] = [
-        KeepTogether([Paragraph(title, h_style), Spacer(1, gap_title_to_content), first])
+        KeepTogether([Paragraph(title, h_style), Spacer(1, gap_title_to_content)]),
+        first,
     ]
     if len(content) > 1:
         out.extend(content[1:])
@@ -275,7 +278,7 @@ def build_plan_pdf(plan: Any) -> bytes:
             small,
         )
     )
-    story.append(Spacer(1, 12))
+    story.append(Spacer(1, 8))
 
     # 1. Datos generales
     cond_list = getattr(plan, "conductores", None) or []
@@ -314,7 +317,9 @@ def build_plan_pdf(plan: Any) -> bytes:
         col_widths=[6.2 * cm, 11.0 * cm],
         kv_shading=True,
     )
-    story.extend(_section_block("1. DATOS GENERALES", t1, h_style=h_style))
+    story.extend(
+        _section_block("1. DATOS GENERALES", t1, h_style=h_style, gap_after_section=6.0)
+    )
 
     # 2. Planificación
     t2 = _table(
@@ -336,7 +341,7 @@ def build_plan_pdf(plan: Any) -> bytes:
         _section_block(
             "2. PLANIFICACIÓN DE VIAJE",
             t2,
-            Spacer(1, 8),
+            Spacer(1, 6),
             _boxed_text(
                 "Propósito del viaje",
                 str(getattr(plan, "proposito", "") or ""),
@@ -344,7 +349,7 @@ def build_plan_pdf(plan: Any) -> bytes:
                 small_value,
                 height_cm=2.0,
             ),
-            Spacer(1, 8),
+            Spacer(1, 6),
             _boxed_text(
                 "Condiciones del camino",
                 str(getattr(plan, "condiciones_camino", "") or ""),
@@ -352,7 +357,7 @@ def build_plan_pdf(plan: Any) -> bytes:
                 small_value,
                 height_cm=0.9,
             ),
-            Spacer(1, 8),
+            Spacer(1, 6),
             _boxed_text(
                 "Observaciones adicionales",
                 str(getattr(plan, "observaciones", "") or ""),
@@ -361,6 +366,7 @@ def build_plan_pdf(plan: Any) -> bytes:
                 height_cm=1.6,
             ),
             h_style=h_style,
+            gap_title_to_content=5.0,
         )
     )
 
