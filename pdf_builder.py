@@ -114,141 +114,6 @@ def _table(
     return t
 
 
-def _itinerary_cover(plan: Any, title_style: ParagraphStyle, small_label: ParagraphStyle, small_value: ParagraphStyle) -> list[Any]:
-    """
-    Portada tipo "itinerario" inspirada en plantilla visual del usuario.
-    Conserva datos clave y deja el detalle completo para las secciones siguientes.
-    """
-    out: list[Any] = []
-    usable_w = 17.2 * cm
-
-    logo_cell: Any = _p("TU LOGO", small_label)
-    logo_bytes = getattr(plan, "empresa_logo_bytes", None)
-    if logo_bytes:
-        try:
-            logo = Image(io.BytesIO(logo_bytes))
-            logo._restrictSize(2.6 * cm, 2.6 * cm)
-            logo_cell = logo
-        except Exception:
-            pass
-
-    head = Table(
-        [[Paragraph("<b>PLAN DE GESTIÓN<br/>DE VIAJE</b>", title_style), logo_cell]],
-        colWidths=[usable_w - 3.1 * cm, 3.1 * cm],
-        hAlign="LEFT",
-    )
-    head.setStyle(
-        TableStyle(
-            [
-                ("GRID", (0, 0), (-1, -1), 1.2, colors.black),
-                ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
-                ("ALIGN", (1, 0), (1, 0), "CENTER"),
-                ("LEFTPADDING", (0, 0), (-1, -1), 8),
-                ("RIGHTPADDING", (0, 0), (-1, -1), 8),
-                ("TOPPADDING", (0, 0), (-1, -1), 8),
-                ("BOTTOMPADDING", (0, 0), (-1, -1), 8),
-            ]
-        )
-    )
-    out.append(head)
-    out.append(Spacer(1, 6))
-
-    duracion = str(getattr(plan, "duracion_horas", "") or "").strip()
-    if not duracion and getattr(plan, "fecha_salida", None) and getattr(plan, "fecha_llegada", None):
-        duracion = f"{_fmt_date(getattr(plan, 'fecha_salida', None))} - {_fmt_date(getattr(plan, 'fecha_llegada', None))}"
-
-    info_tbl = Table(
-        [
-            [
-                _p("<b>DESTINO</b><br/>" + str(getattr(plan, "destino", "") or ""), small_value),
-                _p("<b>DURACIÓN DE LA ESTANCIA</b><br/>" + duracion, small_value),
-            ],
-            [
-                _p("<b>SALIDA DEL VUELO / VIAJE</b><br/>" + str(getattr(plan, "hora_salida", "") or ""), small_value),
-                _p("<b>LLEGADA DEL VUELO / VIAJE</b><br/>" + str(getattr(plan, "hora_llegada", "") or ""), small_value),
-            ],
-        ],
-        colWidths=[usable_w / 2, usable_w / 2],
-        hAlign="LEFT",
-    )
-    info_tbl.setStyle(
-        TableStyle(
-            [
-                ("GRID", (0, 0), (-1, -1), 1.2, colors.black),
-                ("VALIGN", (0, 0), (-1, -1), "TOP"),
-                ("LEFTPADDING", (0, 0), (-1, -1), 8),
-                ("RIGHTPADDING", (0, 0), (-1, -1), 8),
-                ("TOPPADDING", (0, 0), (-1, -1), 8),
-                ("BOTTOMPADDING", (0, 0), (-1, -1), 8),
-            ]
-        )
-    )
-    out.append(info_tbl)
-
-    paradas = getattr(plan, "paradas_ida", []) or []
-    max_rows = max(4, len(paradas))
-    day_rows: list[list[Any]] = []
-    for i in range(max_rows):
-        stop = paradas[i] if i < len(paradas) else None
-        que_hacer = ""
-        presupuesto = ""
-        if stop:
-            lugar = str(getattr(stop, "lugar", "") or "").strip()
-            motivo = str(getattr(stop, "motivo", "") or "").strip()
-            tiempo = str(getattr(stop, "tiempo_min", "") or "").strip()
-            que_hacer = " - ".join([x for x in [lugar, motivo] if x])
-            presupuesto = f"{tiempo} min" if tiempo else ""
-        day_rows.append(
-            [
-                _p(f"<b>DÍA {i + 1:02d}</b>", small_label),
-                _p("<b>QUÉ HACER</b><br/>" + que_hacer, small_value),
-                _p("<b>PRESUPUESTO</b><br/>" + presupuesto, small_value),
-            ]
-        )
-
-    days_tbl = Table(
-        day_rows,
-        colWidths=[1.4 * cm, 10.0 * cm, usable_w - 11.4 * cm],
-        rowHeights=[2.2 * cm] * len(day_rows),
-        hAlign="LEFT",
-    )
-    days_tbl.setStyle(
-        TableStyle(
-            [
-                ("GRID", (0, 0), (-1, -1), 1.2, colors.black),
-                ("VALIGN", (0, 0), (-1, -1), "TOP"),
-                ("ALIGN", (0, 0), (0, -1), "CENTER"),
-                ("LEFTPADDING", (0, 0), (-1, -1), 8),
-                ("RIGHTPADDING", (0, 0), (-1, -1), 8),
-                ("TOPPADDING", (0, 0), (-1, -1), 8),
-                ("BOTTOMPADDING", (0, 0), (-1, -1), 8),
-            ]
-        )
-    )
-    out.append(days_tbl)
-
-    footer_txt = (
-        f"<font color='white'><b>Fecha de inicio:</b> {_fmt_date(getattr(plan, 'fecha_salida', None)) or '-'}"
-        f" &nbsp;&nbsp; <b>Fecha de finalización:</b> {_fmt_date(getattr(plan, 'fecha_llegada', None)) or '-'}</font>"
-    )
-    footer_tbl = Table([[Paragraph(footer_txt, small_value)]], colWidths=[usable_w], hAlign="LEFT")
-    footer_tbl.setStyle(
-        TableStyle(
-            [
-                ("BACKGROUND", (0, 0), (0, 0), colors.black),
-                ("GRID", (0, 0), (-1, -1), 1.2, colors.black),
-                ("LEFTPADDING", (0, 0), (-1, -1), 8),
-                ("RIGHTPADDING", (0, 0), (-1, -1), 8),
-                ("TOPPADDING", (0, 0), (-1, -1), 7),
-                ("BOTTOMPADDING", (0, 0), (-1, -1), 7),
-            ]
-        )
-    )
-    out.append(footer_tbl)
-    out.append(Spacer(1, 8))
-    return out
-
-
 def build_plan_pdf(plan: Any) -> bytes:
     buf = io.BytesIO()
     doc = SimpleDocTemplate(
@@ -265,10 +130,9 @@ def build_plan_pdf(plan: Any) -> bytes:
     title_style = ParagraphStyle(
         "TitleSmall",
         parent=styles["Title"],
-        fontSize=24,
-        leading=26,
+        fontSize=14,
+        leading=16,
         spaceAfter=8,
-        fontName="Helvetica-Bold",
     )
     h_style = ParagraphStyle(
         "H",
@@ -317,8 +181,6 @@ def build_plan_pdf(plan: Any) -> bytes:
     )
 
     story: list[Any] = []
-    story.extend(_itinerary_cover(plan, title_style, small_label, small_value))
-    story.append(Spacer(1, 4))
 
     # Encabezado (estilo RU-40: logo | título | código/rev/fecha)
     empresa = (getattr(plan, "empresa_nombre", "") or "").strip() or "ALS ECUADOR"
