@@ -897,8 +897,15 @@ def _load_ubicaciones_desde_archivo_local() -> None:
                     f"Google Sheets ({_ubi_id}) · pestaña `{_ubicaciones_gsheet_worksheet_spec()}`"
                 )
                 return
+            st.session_state.ubicaciones_source = (
+                f"Error: Google Sheets ({_ubi_id}) sin columnas válidas de provincia/cantón/parroquia"
+            )
+            return
         except Exception:
-            pass
+            st.session_state.ubicaciones_source = (
+                f"Error: no se pudo leer Google Sheets ({_ubi_id})"
+            )
+            return
     xlsx_path = _ruta_excel_codificacion()
     if xlsx_path and os.path.isfile(xlsx_path):
         norm = _cached_norm_ubicaciones_excel(xlsx_path, os.path.getmtime(xlsx_path))
@@ -1204,14 +1211,28 @@ div[data-baseweb="input"] > div { min-height: 42px; }
 
         st.subheader("Ubicaciones (opcional)")
         _xlsx_here = _ruta_excel_codificacion()
-        st.caption(
-            f"Opcional: define **`PLAN_UBICACIONES_SPREADSHEET_ID`** para cargar DPA desde Google Sheets. "
-            f"Si no, se usa **`{UBICACIONES_XLSX_PRIMARY}`** / **`{UBICACIONES_CSV_PATH}`** en esta carpeta. "
-            f"También puedes subir un **.xlsx** o **.csv** aquí. "
-            f"Hoja Excel local: variable `{UBICACIONES_SHEET_ENV}` (índice o nombre)."
-        )
-        if _xlsx_here:
+        _ubi_cfg_id = _gsheet_ubicaciones_spreadsheet_id()
+        if _ubi_cfg_id:
+            st.caption(
+                "Modo **solo Google Sheets**: con **`PLAN_UBICACIONES_SPREADSHEET_ID`** definido no se usa el Excel "
+                f"ni el CSV de la carpeta del servidor. Pestaña: **`{_ubicaciones_gsheet_worksheet_spec()}`** "
+                f"(`{PLAN_UBICACIONES_WORKSHEET_ENV}`). Comparte el Sheet con la cuenta de servicio."
+            )
+            st.caption(f"ID de ubicaciones activo (últimos 10 caracteres): `…{_ubi_cfg_id[-10:]}`")
+        else:
+            st.caption(
+                f"Opcional: define **`PLAN_UBICACIONES_SPREADSHEET_ID`** para cargar DPA desde Google Sheets. "
+                f"Si no, se usa **`{UBICACIONES_XLSX_PRIMARY}`** / **`{UBICACIONES_CSV_PATH}`** en esta carpeta. "
+                f"También puedes subir un **.xlsx** o **.csv** aquí. "
+                f"Hoja Excel local: variable `{UBICACIONES_SHEET_ENV}` (índice o nombre)."
+            )
+        if _xlsx_here and not _ubi_cfg_id:
             st.write(f"Detectado en disco: `{_xlsx_here}`")
+        elif _xlsx_here and _ubi_cfg_id:
+            st.caption(
+                f"(Hay un archivo `{os.path.basename(_xlsx_here)}` en el despliegue, pero **no se usa** mientras exista "
+                "`PLAN_UBICACIONES_SPREADSHEET_ID`.)"
+            )
         ubi_upload = st.file_uploader(
             "Subir Excel (CODIFICACIÓN) o CSV de ubicaciones",
             type=["csv", "xlsx"],
@@ -1240,6 +1261,11 @@ div[data-baseweb="input"] > div { min-height: 42px; }
         ubi_n = st.session_state.get("ubicaciones_df")
         ubi_src = (st.session_state.get("ubicaciones_source") or "Sin datos").strip()
         st.caption(f"Fuente activa de ubicaciones: **{ubi_src}**")
+        if ubi_src.startswith("Error:"):
+            st.error(
+                f"{ubi_src} · Revisa permisos del Sheet, el ID y que la pestaña tenga columnas "
+                "reconocibles (provincia / cantón / parroquia o DPA_DESPRO, DPA_DESCAN, DPA_DESPAR)."
+            )
         if ubi_n is not None and not getattr(ubi_n, "empty", True):
             st.write(f"Filas activas: **{len(ubi_n)}**")
         if st.button("Usar solo texto (sin lista)", help="Quita la lista y vuelve a escribir origen/destino a mano"):
