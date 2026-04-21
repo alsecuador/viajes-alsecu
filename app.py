@@ -131,7 +131,7 @@ STOP_MOTIVO_OPTIONS = [
     "Alimentacion (almuerzo)",
     "Alimentacion (merienda)",
 ]
-STOP_TIEMPO_MIN_OPTIONS = [5, 10, 15, 20, 30, 45, 60, 120, 240]
+STOP_TIEMPO_MIN_OPTIONS = [5, 10, 15, 20, 30, 45, 60, 120, 240, 300, 360, 420]
 
 
 def _coerce_tiempo_min(val: Any) -> int:

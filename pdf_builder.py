@@ -26,6 +26,27 @@ TABLE_PAD_LR = 10
 TABLE_PAD_TB = 8
 # Márgenes de página (LETTER): izquierdo, derecho, superior e inferior
 PDF_PAGE_MARGIN = 1.5 * cm
+# Proporciones de la tabla "Peligros conocidos" (referencia de ancho total del contenido)
+HAZARD_COL_PARTS = [5.25, 1.05, 5.25, 1.05, 5.25, 1.05]
+
+
+def _pdf_content_width_pt() -> float:
+    """Ancho útil entre márgenes; todas las tablas usan esta misma anchura total."""
+    page_w, _page_h = LETTER
+    return float(page_w - 2 * PDF_PAGE_MARGIN)
+
+
+def _col_widths_from_parts(parts: list[float], total_pt: float) -> list[float]:
+    """Reparte total_pt según proporciones; corrige el último ancho para que la suma sea exacta."""
+    s = float(sum(parts))
+    if s <= 0:
+        n = len(parts)
+        return [total_pt / n] * n if n else [total_pt]
+    raw = [total_pt * (p / s) for p in parts]
+    diff = total_pt - sum(raw)
+    if raw:
+        raw[-1] += diff
+    return raw
 
 
 def _fmt_date(d: date | None) -> str:
@@ -70,9 +91,10 @@ def _boxed_text(label: str, text: str, label_style: ParagraphStyle, value_style:
         fontName="Helvetica-Bold",
     )
     content = _p((text or "").strip() or "&nbsp;", value_style)
+    tw = _pdf_content_width_pt()
     t = Table(
         [[_p(label, label_on_dark)], [content]],
-        colWidths=[17.2 * cm],
+        colWidths=[tw],
         rowHeights=[None, height_cm * cm],
         hAlign="LEFT",
     )
@@ -225,6 +247,12 @@ def build_plan_pdf(plan: Any) -> bytes:
 
     story: list[Any] = []
 
+    content_w = _pdf_content_width_pt()
+    w_cols_kv = _col_widths_from_parts([6.2, 11.0], content_w)
+    w_cols_paradas = _col_widths_from_parts([1.0, 5.6, 7.6, 4.0], content_w)
+    w_cols_header = _col_widths_from_parts([3.2, 11.0, 3.0], content_w)
+    w_cols_hazard = _col_widths_from_parts(HAZARD_COL_PARTS, content_w)
+
     # Encabezado (estilo RU-40: logo | título | código/rev/fecha)
     empresa = (getattr(plan, "empresa_nombre", "") or "").strip() or "ALS ECUADOR"
     doc_code = (getattr(plan, "doc_code", "") or "").strip()
@@ -272,7 +300,7 @@ def build_plan_pdf(plan: Any) -> bytes:
 
     header_tbl = Table(
         [[logo_cell, center_cell, right_cell]],
-        colWidths=[3.2 * cm, 11.0 * cm, 3.0 * cm],
+        colWidths=w_cols_header,
         hAlign="LEFT",
     )
     header_tbl.setStyle(
@@ -333,7 +361,7 @@ def build_plan_pdf(plan: Any) -> bytes:
             [_p("Teléfono de Emergencia", small_label), _p(tel_emerg, small_value)],
             [_p("Cédula de identidad (contacto emergencia)", small_label), _p(ced_emerg, small_value)],
         ],
-        col_widths=[6.2 * cm, 11.0 * cm],
+        col_widths=w_cols_kv,
         kv_shading=True,
     )
     story.extend(
@@ -353,7 +381,7 @@ def build_plan_pdf(plan: Any) -> bytes:
             [_p("Distancia Total (km)", small_label), _p(str(getattr(plan, "distancia_km", "") or ""), small_value)],
             [_p("Duración Estimada (horas)", small_label), _p(str(getattr(plan, "duracion_horas", "") or ""), small_value)],
         ],
-        col_widths=[6.2 * cm, 11.0 * cm],
+        col_widths=w_cols_kv,
         kv_shading=True,
     )
     story.extend(
@@ -416,7 +444,7 @@ def build_plan_pdf(plan: Any) -> bytes:
             story.append(Paragraph("<b>Captura / imagen desde la app:</b>", small))
             try:
                 im_sos = Image(io.BytesIO(sos_img))
-                im_sos._restrictSize(17.5 * cm, 9.5 * cm)
+                im_sos._restrictSize(content_w, 9.5 * cm)
                 story.append(im_sos)
                 story.append(Spacer(1, 8))
             except Exception:
@@ -431,7 +459,7 @@ def build_plan_pdf(plan: Any) -> bytes:
         stops_rows.append([getattr(s, "n", ""), getattr(s, "lugar", ""), getattr(s, "motivo", ""), getattr(s, "tiempo_min", "")])
     t3 = _table(
         stops_rows,
-        col_widths=[1.0 * cm, 5.6 * cm, 7.6 * cm, 4.0 * cm],
+        col_widths=w_cols_paradas,
         header_row=True,
     )
     story.extend(_section_block("3. PARADAS PLANIFICADAS (IDA)", t3, h_style=h_style))
@@ -465,7 +493,7 @@ def build_plan_pdf(plan: Any) -> bytes:
     ]
     hazards = Table(
         hazard_data,
-        colWidths=[5.25 * cm, 1.05 * cm, 5.25 * cm, 1.05 * cm, 5.25 * cm, 1.05 * cm],
+        colWidths=w_cols_hazard,
         hAlign="LEFT",
     )
     hazards.setStyle(
@@ -516,7 +544,7 @@ def build_plan_pdf(plan: Any) -> bytes:
         )
         try:
             im = Image(io.BytesIO(img_bytes))
-            im._restrictSize(17.5 * cm, 9.5 * cm)
+            im._restrictSize(content_w, 9.5 * cm)
             story.append(im)
             story.append(Spacer(1, 8))
         except Exception:
@@ -533,7 +561,7 @@ def build_plan_pdf(plan: Any) -> bytes:
             ],
             [_p("Listado", small_label), _p(_join_lines([str(x) for x in pasajeros_ida]), small_value)],
         ],
-        col_widths=[6.2 * cm, 11.0 * cm],
+        col_widths=w_cols_kv,
         kv_shading=True,
     )
     story.extend(_section_block("Pasajeros (IDA)", t_pax_ida, h_style=h_style))
@@ -558,7 +586,7 @@ def build_plan_pdf(plan: Any) -> bytes:
             ],
             [_p("Listado", small_label), _p(_join_lines([str(x) for x in pasajeros_vuelta]), small_value)],
         ],
-        col_widths=[6.2 * cm, 11.0 * cm],
+        col_widths=w_cols_kv,
         kv_shading=True,
     )
     story.extend(_section_block("5. VIAJE DE VUELTA", t5, h_style=h_style))
@@ -575,7 +603,7 @@ def build_plan_pdf(plan: Any) -> bytes:
         )
         try:
             imv = Image(io.BytesIO(img_vuelta_bytes))
-            imv._restrictSize(17.5 * cm, 9.5 * cm)
+            imv._restrictSize(content_w, 9.5 * cm)
             story.append(imv)
             story.append(Spacer(1, 8))
         except Exception:
@@ -588,7 +616,7 @@ def build_plan_pdf(plan: Any) -> bytes:
         v_rows.append(["", "", "", ""])
     t_paradas_vuelta = _table(
         v_rows,
-        col_widths=[1.0 * cm, 5.6 * cm, 7.6 * cm, 4.0 * cm],
+        col_widths=w_cols_paradas,
         header_row=True,
     )
     story.extend(_section_block("PARADAS PLANIFICADAS (VUELTA)", t_paradas_vuelta, h_style=h_style))
@@ -610,7 +638,7 @@ def build_plan_pdf(plan: Any) -> bytes:
             [_p("Firma responsable de aprobación plan", small_label), _p(firma_aprueba, small_value)],
             [_p("Fecha", small_label), _p(_fmt_date(getattr(plan, "fecha_firma", None)), small_value)],
         ],
-        col_widths=[6.2 * cm, 11.0 * cm],
+        col_widths=w_cols_kv,
         kv_shading=True,
     )
     story.extend(_section_block("6. APROBACIÓN", t6, h_style=h_style))
