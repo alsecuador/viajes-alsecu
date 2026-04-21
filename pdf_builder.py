@@ -6,7 +6,6 @@ from typing import Any
 
 from reportlab.lib import colors
 from reportlab.lib.enums import TA_CENTER, TA_LEFT
-from reportlab.lib.utils import simpleSplit
 from reportlab.lib.pagesizes import LETTER
 from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet
 from reportlab.lib.units import cm
@@ -17,6 +16,7 @@ SECTION_BLUE = colors.HexColor("#0d47a1")
 LABEL_BG = colors.HexColor("#e8eef6")
 VALUE_BG = colors.HexColor("#ffffff")
 LABEL_TEXT = colors.HexColor("#37474f")
+BORDER = colors.HexColor("#9aa6b2")
 
 
 def _fmt_date(d: date | None) -> str:
@@ -65,10 +65,10 @@ def _boxed_text(label: str, text: str, label_style: ParagraphStyle, value_style:
             [
                 ("GRID", (0, 0), (-1, -1), 0.5, colors.grey),
                 ("VALIGN", (0, 0), (-1, -1), "TOP"),
-                ("LEFTPADDING", (0, 0), (-1, -1), 6),
-                ("RIGHTPADDING", (0, 0), (-1, -1), 6),
-                ("TOPPADDING", (0, 0), (-1, -1), 4),
-                ("BOTTOMPADDING", (0, 0), (-1, -1), 4),
+                ("LEFTPADDING", (0, 0), (-1, -1), 8),
+                ("RIGHTPADDING", (0, 0), (-1, -1), 8),
+                ("TOPPADDING", (0, 0), (-1, -1), 6),
+                ("BOTTOMPADDING", (0, 0), (-1, -1), 6),
                 ("BACKGROUND", (0, 0), (0, 0), LABEL_BG),
                 ("BACKGROUND", (0, 1), (0, 1), VALUE_BG),
             ]
@@ -86,13 +86,13 @@ def _table(
 ) -> Table:
     t = Table(data, colWidths=col_widths, hAlign="LEFT")
     style_cmds: list[tuple[Any, ...]] = [
-        ("GRID", (0, 0), (-1, -1), 0.5, colors.grey),
+        ("GRID", (0, 0), (-1, -1), 0.5, BORDER),
         ("VALIGN", (0, 0), (-1, -1), "TOP"),
         ("FONTSIZE", (0, 0), (-1, -1), 9),
-        ("LEFTPADDING", (0, 0), (-1, -1), 6),
-        ("RIGHTPADDING", (0, 0), (-1, -1), 6),
-        ("TOPPADDING", (0, 0), (-1, -1), 4),
-        ("BOTTOMPADDING", (0, 0), (-1, -1), 4),
+        ("LEFTPADDING", (0, 0), (-1, -1), 8),
+        ("RIGHTPADDING", (0, 0), (-1, -1), 8),
+        ("TOPPADDING", (0, 0), (-1, -1), 6),
+        ("BOTTOMPADDING", (0, 0), (-1, -1), 6),
         ("WORDWRAP", (0, 0), (-1, -1), "CJK"),
     ]
     if kv_shading and col_widths and len(col_widths) == 2:
@@ -122,11 +122,17 @@ def _section_block(
     gap_after_section: float = 12.0,
 ) -> list[Any]:
     """
-    Arma una sección con separación más cómoda y manteniendo título + primer bloque juntos.
+    Arma una sección con separación cómoda manteniendo título + primer bloque juntos.
+    El resto de contenido puede fluir en página siguiente si es largo.
     """
-    block_items = [Paragraph(title, h_style), Spacer(1, gap_title_to_content)]
-    block_items.extend(content)
-    return [KeepTogether(block_items), Spacer(1, gap_after_section)]
+    first = content[0] if content else Spacer(1, 1)
+    out: list[Any] = [
+        KeepTogether([Paragraph(title, h_style), Spacer(1, gap_title_to_content), first])
+    ]
+    if len(content) > 1:
+        out.extend(content[1:])
+    out.append(Spacer(1, gap_after_section))
+    return out
 
 
 def build_plan_pdf(plan: Any) -> bytes:
@@ -145,34 +151,34 @@ def build_plan_pdf(plan: Any) -> bytes:
     title_style = ParagraphStyle(
         "TitleSmall",
         parent=styles["Title"],
-        fontSize=14,
-        leading=16,
-        spaceAfter=8,
+        fontSize=15,
+        leading=17,
+        spaceAfter=10,
     )
     h_style = ParagraphStyle(
         "H",
         parent=styles["Heading2"],
-        fontSize=11,
-        leading=13,
+        fontSize=11.4,
+        leading=14.5,
         spaceBefore=0,
         spaceAfter=0,
         textColor=SECTION_BLUE,
         fontName="Helvetica-Bold",
     )
-    small = ParagraphStyle("Small", parent=styles["Normal"], fontSize=9, leading=11)
+    small = ParagraphStyle("Small", parent=styles["Normal"], fontSize=9.2, leading=12.2)
     small_label = ParagraphStyle(
         "SmallLabel",
         parent=styles["Normal"],
-        fontSize=9,
-        leading=11,
+        fontSize=9.2,
+        leading=12.2,
         textColor=LABEL_TEXT,
         fontName="Helvetica-Bold",
     )
     small_value = ParagraphStyle(
         "SmallValue",
         parent=styles["Normal"],
-        fontSize=8.8,
-        leading=10.4,
+        fontSize=9.0,
+        leading=12.0,
         textColor=colors.black,
         fontName="Helvetica",
     )
@@ -180,8 +186,8 @@ def build_plan_pdf(plan: Any) -> bytes:
         "HazardLabel",
         parent=small_label,
         alignment=TA_LEFT,
-        fontSize=9,
-        leading=11,
+        fontSize=9.2,
+        leading=12.2,
         textColor=LABEL_TEXT,
         fontName="Helvetica-Bold",
     )
@@ -250,17 +256,17 @@ def build_plan_pdf(plan: Any) -> bytes:
     header_tbl.setStyle(
         TableStyle(
             [
-                ("GRID", (0, 0), (-1, -1), 0.7, colors.grey),
+                ("GRID", (0, 0), (-1, -1), 0.8, BORDER),
                 ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
-                ("LEFTPADDING", (0, 0), (-1, -1), 6),
-                ("RIGHTPADDING", (0, 0), (-1, -1), 6),
-                ("TOPPADDING", (0, 0), (-1, -1), 6),
-                ("BOTTOMPADDING", (0, 0), (-1, -1), 6),
+                ("LEFTPADDING", (0, 0), (-1, -1), 8),
+                ("RIGHTPADDING", (0, 0), (-1, -1), 8),
+                ("TOPPADDING", (0, 0), (-1, -1), 8),
+                ("BOTTOMPADDING", (0, 0), (-1, -1), 8),
             ]
         )
     )
     story.append(header_tbl)
-    story.append(Spacer(1, 6))
+    story.append(Spacer(1, 8))
 
     story.append(
         Paragraph(
@@ -269,7 +275,7 @@ def build_plan_pdf(plan: Any) -> bytes:
             small,
         )
     )
-    story.append(Spacer(1, 8))
+    story.append(Spacer(1, 12))
 
     # 1. Datos generales
     cond_list = getattr(plan, "conductores", None) or []
@@ -361,14 +367,14 @@ def build_plan_pdf(plan: Any) -> bytes:
     sos_txt = (getattr(plan, "international_sos_text", "") or "").strip()
     sos_img = getattr(plan, "international_sos_imagen_bytes", None)
     if sos_txt or sos_img:
-        story.append(Spacer(1, 8))
+        story.append(Spacer(1, 10))
         story.append(
             Paragraph(
                 "<font color='#0d47a1'><b>APP International SOS</b></font>",
                 small_label,
             )
         )
-        story.append(Spacer(1, 4))
+        story.append(Spacer(1, 6))
         if sos_txt:
             story.append(
                 _boxed_text(
@@ -380,13 +386,14 @@ def build_plan_pdf(plan: Any) -> bytes:
                 )
             )
             if sos_img:
-                story.append(Spacer(1, 6))
+                story.append(Spacer(1, 8))
         if sos_img:
             story.append(Paragraph("<b>Captura / imagen desde la app:</b>", small))
             try:
                 im_sos = Image(io.BytesIO(sos_img))
                 im_sos._restrictSize(17.5 * cm, 9.5 * cm)
                 story.append(im_sos)
+                story.append(Spacer(1, 8))
             except Exception:
                 story.append(
                     Paragraph("No se pudo incrustar la imagen de International SOS.", small_value)
@@ -439,12 +446,12 @@ def build_plan_pdf(plan: Any) -> bytes:
     hazards.setStyle(
         TableStyle(
             [
-                ("GRID", (0, 0), (-1, -1), 0.5, colors.grey),
+                ("GRID", (0, 0), (-1, -1), 0.5, BORDER),
                 ("VALIGN", (0, 0), (-1, -1), "TOP"),
-                ("LEFTPADDING", (0, 0), (-1, -1), 6),
-                ("RIGHTPADDING", (0, 0), (-1, -1), 6),
-                ("TOPPADDING", (0, 0), (-1, -1), 5),
-                ("BOTTOMPADDING", (0, 0), (-1, -1), 5),
+                ("LEFTPADDING", (0, 0), (-1, -1), 8),
+                ("RIGHTPADDING", (0, 0), (-1, -1), 8),
+                ("TOPPADDING", (0, 0), (-1, -1), 7),
+                ("BOTTOMPADDING", (0, 0), (-1, -1), 7),
                 ("ROWBACKGROUNDS", (0, 0), (-1, -1), [LABEL_BG, colors.HexColor("#f5f7fb")]),
                 ("ALIGN", (1, 0), (1, -1), "CENTER"),
                 ("ALIGN", (3, 0), (3, -1), "CENTER"),
@@ -472,17 +479,18 @@ def build_plan_pdf(plan: Any) -> bytes:
     # Ruta (imagen)
     img_bytes = getattr(plan, "ruta_imagen_bytes", None)
     if img_bytes:
-        story.append(Spacer(1, 8))
+        story.append(Spacer(1, 10))
         story.append(Paragraph("<font color='#0d47a1'><b>Ruta para tomar (imagen):</b></font>", small))
         try:
             im = Image(io.BytesIO(img_bytes))
             im._restrictSize(17.5 * cm, 9.5 * cm)
             story.append(im)
+            story.append(Spacer(1, 8))
         except Exception:
             story.append(Paragraph("No se pudo incrustar la imagen de ruta (formato no compatible).", small))
 
     # Pasajeros ida (1 columna)
-    story.append(Spacer(1, 8))
+    story.append(Spacer(1, 10))
     pasajeros_ida = getattr(plan, "pasajeros_ida", []) or []
     t_pax_ida = _table(
         [
@@ -509,8 +517,7 @@ def build_plan_pdf(plan: Any) -> bytes:
             [_p("Fecha de salida", small_label), _p(_fmt_date(getattr(plan, "vuelta_fecha_salida", None)), small_value)],
             [
                 _p("Fecha estimada de llegada", small_label),
-                _p(_fmt_date(getattr(plan, "vuelta_fecha_llegada", None)),
-                small_value),
+                _p(_fmt_date(getattr(plan, "vuelta_fecha_llegada", None)), small_value),
             ],
             [
                 _p("Cantidad de Pasajeros", small_label),
@@ -526,16 +533,15 @@ def build_plan_pdf(plan: Any) -> bytes:
     # Ruta vuelta (imagen)
     img_vuelta_bytes = getattr(plan, "ruta_vuelta_imagen_bytes", None)
     if img_vuelta_bytes:
-        story.append(Spacer(1, 8))
+        story.append(Spacer(1, 10))
         story.append(Paragraph("<font color='#0d47a1'><b>Ruta para tomar (imagen) (VUELTA):</b></font>", small))
         try:
             imv = Image(io.BytesIO(img_vuelta_bytes))
             imv._restrictSize(17.5 * cm, 9.5 * cm)
             story.append(imv)
+            story.append(Spacer(1, 8))
         except Exception:
             story.append(Paragraph("No se pudo incrustar la imagen de ruta (VUELTA).", small))
-
-    
     paradas_vuelta = getattr(plan, "paradas_vuelta", []) or []
     v_rows = [["N°", "Lugar / Ciudad", "Motivo", "Tiempo estimado (min)"]]
     for s in paradas_vuelta:
