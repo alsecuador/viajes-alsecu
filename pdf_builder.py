@@ -11,12 +11,19 @@ from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet
 from reportlab.lib.units import cm
 from reportlab.platypus import Image, KeepTogether, Paragraph, SimpleDocTemplate, Spacer, Table, TableStyle
 
-# Paleta (PDF): títulos de sección azules; etiquetas vs valores en tablas llave-valor
-SECTION_BLUE = colors.HexColor("#1F4E79")
-LABEL_BG = colors.HexColor("#F3F7FB")
-VALUE_BG = colors.HexColor("#ffffff")
+# Paleta ALS y lectura (PDF)
+CORPORATE_BLUE_HEX = "#003087"
+CORPORATE_BLUE = colors.HexColor(CORPORATE_BLUE_HEX)
+SECTION_BLUE = CORPORATE_BLUE  # títulos de sección y acentos
+TABLE_HEADER_BG = CORPORATE_BLUE
+TABLE_HEADER_TEXT = colors.white
+ROW_ALT_BG = colors.HexColor("#F5F5F5")
+VALUE_BG = colors.white
 LABEL_TEXT = colors.HexColor("#2F3A45")
-BORDER = colors.HexColor("#C5CED8")
+BORDER = colors.HexColor("#D0D5DC")
+TABLE_GRID_WIDTH = 0.25
+TABLE_PAD_LR = 10
+TABLE_PAD_TB = 8
 
 
 def _fmt_date(d: date | None) -> str:
@@ -52,10 +59,17 @@ def _join_lines(items: list[str]) -> str:
 def _boxed_text(label: str, text: str, label_style: ParagraphStyle, value_style: ParagraphStyle, height_cm: float) -> Table:
     """
     Caja con borde para texto multilinea (tipo formulario).
+    Fila de etiqueta: azul corporativo y texto blanco en negrita.
     """
+    label_on_dark = ParagraphStyle(
+        "BoxLabelOnDark",
+        parent=label_style,
+        textColor=TABLE_HEADER_TEXT,
+        fontName="Helvetica-Bold",
+    )
     content = _p((text or "").strip() or "&nbsp;", value_style)
     t = Table(
-        [[_p(label, label_style)], [content]],
+        [[_p(label, label_on_dark)], [content]],
         colWidths=[17.2 * cm],
         rowHeights=[None, height_cm * cm],
         hAlign="LEFT",
@@ -63,13 +77,13 @@ def _boxed_text(label: str, text: str, label_style: ParagraphStyle, value_style:
     t.setStyle(
         TableStyle(
             [
-                ("GRID", (0, 0), (-1, -1), 0.5, colors.grey),
+                ("GRID", (0, 0), (-1, -1), TABLE_GRID_WIDTH, BORDER),
                 ("VALIGN", (0, 0), (-1, -1), "TOP"),
-                ("LEFTPADDING", (0, 0), (-1, -1), 8),
-                ("RIGHTPADDING", (0, 0), (-1, -1), 8),
-                ("TOPPADDING", (0, 0), (-1, -1), 6),
-                ("BOTTOMPADDING", (0, 0), (-1, -1), 6),
-                ("BACKGROUND", (0, 0), (0, 0), LABEL_BG),
+                ("LEFTPADDING", (0, 0), (-1, -1), TABLE_PAD_LR),
+                ("RIGHTPADDING", (0, 0), (-1, -1), TABLE_PAD_LR),
+                ("TOPPADDING", (0, 0), (-1, -1), TABLE_PAD_TB),
+                ("BOTTOMPADDING", (0, 0), (-1, -1), TABLE_PAD_TB),
+                ("BACKGROUND", (0, 0), (0, 0), TABLE_HEADER_BG),
                 ("BACKGROUND", (0, 1), (0, 1), VALUE_BG),
             ]
         )
@@ -86,30 +100,33 @@ def _table(
 ) -> Table:
     t = Table(data, colWidths=col_widths, hAlign="LEFT")
     style_cmds: list[tuple[Any, ...]] = [
-        ("GRID", (0, 0), (-1, -1), 0.5, BORDER),
+        ("GRID", (0, 0), (-1, -1), TABLE_GRID_WIDTH, BORDER),
         ("VALIGN", (0, 0), (-1, -1), "TOP"),
         ("FONTSIZE", (0, 0), (-1, -1), 9),
-        ("LEFTPADDING", (0, 0), (-1, -1), 8),
-        ("RIGHTPADDING", (0, 0), (-1, -1), 8),
-        ("TOPPADDING", (0, 0), (-1, -1), 6),
-        ("BOTTOMPADDING", (0, 0), (-1, -1), 6),
+        ("LEFTPADDING", (0, 0), (-1, -1), TABLE_PAD_LR),
+        ("RIGHTPADDING", (0, 0), (-1, -1), TABLE_PAD_LR),
+        ("TOPPADDING", (0, 0), (-1, -1), TABLE_PAD_TB),
+        ("BOTTOMPADDING", (0, 0), (-1, -1), TABLE_PAD_TB),
         ("WORDWRAP", (0, 0), (-1, -1), "CJK"),
     ]
-    if kv_shading and col_widths and len(col_widths) == 2:
-        style_cmds.extend(
-            [
-                ("BACKGROUND", (0, 0), (0, -1), LABEL_BG),
-                ("BACKGROUND", (1, 0), (1, -1), VALUE_BG),
-            ]
-        )
+    nrows = len(data) if data else 0
     if header_row and data:
+        if nrows > 1:
+            style_cmds.append(
+                ("ROWBACKGROUNDS", (0, 1), (-1, -1), [VALUE_BG, ROW_ALT_BG]),
+            )
         style_cmds.extend(
             [
-                ("BACKGROUND", (0, 0), (-1, 0), LABEL_BG),
+                ("BACKGROUND", (0, 0), (-1, 0), TABLE_HEADER_BG),
                 ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
-                ("TEXTCOLOR", (0, 0), (-1, 0), SECTION_BLUE),
+                ("TEXTCOLOR", (0, 0), (-1, 0), TABLE_HEADER_TEXT),
+                ("FONTSIZE", (0, 0), (-1, 0), 9.5),
             ]
         )
+    elif kv_shading and col_widths and len(col_widths) == 2:
+        style_cmds.append(("ROWBACKGROUNDS", (0, 0), (-1, -1), [VALUE_BG, ROW_ALT_BG]))
+    elif nrows:
+        style_cmds.append(("ROWBACKGROUNDS", (0, 0), (-1, -1), [VALUE_BG, ROW_ALT_BG]))
     t.setStyle(TableStyle(style_cmds))
     return t
 
@@ -161,8 +178,8 @@ def build_plan_pdf(plan: Any) -> bytes:
     h_style = ParagraphStyle(
         "H",
         parent=styles["Heading2"],
-        fontSize=11.4,
-        leading=14.5,
+        fontSize=12.8,
+        leading=15.5,
         spaceBefore=0,
         spaceAfter=0,
         textColor=SECTION_BLUE,
@@ -259,12 +276,12 @@ def build_plan_pdf(plan: Any) -> bytes:
     header_tbl.setStyle(
         TableStyle(
             [
-                ("GRID", (0, 0), (-1, -1), 0.8, BORDER),
+                ("GRID", (0, 0), (-1, -1), 0.35, BORDER),
                 ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
-                ("LEFTPADDING", (0, 0), (-1, -1), 8),
-                ("RIGHTPADDING", (0, 0), (-1, -1), 8),
-                ("TOPPADDING", (0, 0), (-1, -1), 8),
-                ("BOTTOMPADDING", (0, 0), (-1, -1), 8),
+                ("LEFTPADDING", (0, 0), (-1, -1), TABLE_PAD_LR),
+                ("RIGHTPADDING", (0, 0), (-1, -1), TABLE_PAD_LR),
+                ("TOPPADDING", (0, 0), (-1, -1), TABLE_PAD_TB),
+                ("BOTTOMPADDING", (0, 0), (-1, -1), TABLE_PAD_TB),
             ]
         )
     )
@@ -376,7 +393,7 @@ def build_plan_pdf(plan: Any) -> bytes:
         story.append(Spacer(1, 10))
         story.append(
             Paragraph(
-                "<font color='#0d47a1'><b>APP International SOS</b></font>",
+                f"<font color='{CORPORATE_BLUE_HEX}'><b>APP International SOS</b></font>",
                 small_label,
             )
         )
@@ -452,13 +469,13 @@ def build_plan_pdf(plan: Any) -> bytes:
     hazards.setStyle(
         TableStyle(
             [
-                ("GRID", (0, 0), (-1, -1), 0.5, BORDER),
+                ("GRID", (0, 0), (-1, -1), TABLE_GRID_WIDTH, BORDER),
                 ("VALIGN", (0, 0), (-1, -1), "TOP"),
-                ("LEFTPADDING", (0, 0), (-1, -1), 8),
-                ("RIGHTPADDING", (0, 0), (-1, -1), 8),
-                ("TOPPADDING", (0, 0), (-1, -1), 7),
-                ("BOTTOMPADDING", (0, 0), (-1, -1), 7),
-                ("ROWBACKGROUNDS", (0, 0), (-1, -1), [LABEL_BG, colors.HexColor("#FAFCFE")]),
+                ("LEFTPADDING", (0, 0), (-1, -1), TABLE_PAD_LR),
+                ("RIGHTPADDING", (0, 0), (-1, -1), TABLE_PAD_LR),
+                ("TOPPADDING", (0, 0), (-1, -1), TABLE_PAD_TB),
+                ("BOTTOMPADDING", (0, 0), (-1, -1), TABLE_PAD_TB),
+                ("ROWBACKGROUNDS", (0, 0), (-1, -1), [VALUE_BG, ROW_ALT_BG]),
                 ("ALIGN", (1, 0), (1, -1), "CENTER"),
                 ("ALIGN", (3, 0), (3, -1), "CENTER"),
                 ("ALIGN", (5, 0), (5, -1), "CENTER"),
@@ -476,7 +493,10 @@ def build_plan_pdf(plan: Any) -> bytes:
             "4. PELIGROS CONOCIDOS / MARCA CON UNA X",
             hazards,
             Spacer(1, 8),
-            Paragraph("<font color='#0d47a1'><b>Otros peligros / detalles adicionales:</b></font>", small),
+            Paragraph(
+                f"<font color='{CORPORATE_BLUE_HEX}'><b>Otros peligros / detalles adicionales:</b></font>",
+                small,
+            ),
             Paragraph((getattr(plan, "otros_peligros", "") or "").replace("\n", "<br/>"), small_value),
             h_style=h_style,
         )
@@ -486,7 +506,12 @@ def build_plan_pdf(plan: Any) -> bytes:
     img_bytes = getattr(plan, "ruta_imagen_bytes", None)
     if img_bytes:
         story.append(Spacer(1, 10))
-        story.append(Paragraph("<font color='#0d47a1'><b>Ruta para tomar (imagen):</b></font>", small))
+        story.append(
+            Paragraph(
+                f"<font color='{CORPORATE_BLUE_HEX}'><b>Ruta para tomar (imagen):</b></font>",
+                small,
+            )
+        )
         try:
             im = Image(io.BytesIO(img_bytes))
             im._restrictSize(17.5 * cm, 9.5 * cm)
@@ -540,7 +565,12 @@ def build_plan_pdf(plan: Any) -> bytes:
     img_vuelta_bytes = getattr(plan, "ruta_vuelta_imagen_bytes", None)
     if img_vuelta_bytes:
         story.append(Spacer(1, 10))
-        story.append(Paragraph("<font color='#0d47a1'><b>Ruta para tomar (imagen) (VUELTA):</b></font>", small))
+        story.append(
+            Paragraph(
+                f"<font color='{CORPORATE_BLUE_HEX}'><b>Ruta para tomar (imagen) (VUELTA):</b></font>",
+                small,
+            )
+        )
         try:
             imv = Image(io.BytesIO(img_vuelta_bytes))
             imv._restrictSize(17.5 * cm, 9.5 * cm)
