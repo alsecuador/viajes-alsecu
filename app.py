@@ -69,6 +69,10 @@ def _gsheet_ubicaciones_spreadsheet_id() -> str:
 PLAN_BD_WORKSHEET_ENV = "PLAN_BD_WORKSHEET"
 PLAN_VEHICLES_WORKSHEET_ENV = "PLAN_VEHICLES_WORKSHEET"
 PLAN_UBICACIONES_WORKSHEET_ENV = "PLAN_UBICACIONES_WORKSHEET"
+# Libro CODIFICACIÓN con pestañas separadas (INEC): provincias / cantones / parroquias
+PLAN_UBICACIONES_SHEET_PROVINCIAS_ENV = "PLAN_UBICACIONES_SHEET_PROVINCIAS"
+PLAN_UBICACIONES_SHEET_CANTONES_ENV = "PLAN_UBICACIONES_SHEET_CANTONES"
+PLAN_UBICACIONES_SHEET_PARROQUIAS_ENV = "PLAN_UBICACIONES_SHEET_PARROQUIAS"
 
 # Credenciales: en producción usar st.secrets (ver _load_service_account_dict). Local: credenciales.json
 CREDENTIALS_JSON_PATH = (os.environ.get("PLAN_CREDENTIALS_JSON") or "credenciales.json").strip()
@@ -382,6 +386,116 @@ def _worksheet_to_dataframe(ws: gspread.Worksheet) -> pd.DataFrame:
         padded.append(cells)
     df = pd.DataFrame(padded, columns=header)
     return df.fillna("").astype(str)
+
+
+def _ubicaciones_sheet_title_provinces() -> str:
+    return (_env_or_secret(PLAN_UBICACIONES_SHEET_PROVINCIAS_ENV, "PROVINCIAS") or "PROVINCIAS").strip()
+
+
+def _ubicaciones_sheet_title_cantones() -> str:
+    return (_env_or_secret(PLAN_UBICACIONES_SHEET_CANTONES_ENV, "CANTONES") or "CANTONES").strip()
+
+
+def _ubicaciones_sheet_title_parroquias() -> str:
+    return (_env_or_secret(PLAN_UBICACIONES_SHEET_PARROQUIAS_ENV, "PARROQUIAS") or "PARROQUIAS").strip()
+
+
+def _ubicaciones_raw_df_from_vals(vals: list[list[str]]) -> pd.DataFrame | None:
+    """Devuelve un DataFrame con la primera fila de encabezado plausible (como Excel INEC)."""
+    if not vals or len(vals) < 2:
+        return None
+    for header_ix in (1, 0, 2, 3):
+        if header_ix >= len(vals):
+            continue
+        header = [str(h).strip() for h in vals[header_ix]]
+        if not header or not any(h for h in header):
+            continue
+        data = vals[header_ix + 1 :]
+        ncols = len(header)
+        padded: list[list[str]] = []
+        for row in data:
+            cells = [str(c) if c is not None else "" for c in row]
+            if len(cells) < ncols:
+                cells = cells + [""] * (ncols - len(cells))
+            else:
+                cells = cells[:ncols]
+            if any(str(c).strip() for c in cells):
+                padded.append(cells)
+        if padded:
+            df = pd.DataFrame(padded, columns=header)
+            return df.fillna("").astype(str)
+    return None
+
+
+def _pick_first_col(df: pd.DataFrame, markers: tuple[str, ...], *, avoid: tuple[str, ...] = ()) -> str | None:
+    for c in df.columns:
+        u = _col_norm(c)
+        if any(av in u for av in avoid):
+            continue
+        for m in markers:
+            if m in u:
+                return c
+    return None
+
+
+def _ubicaciones_merge_innec_three_tabs(spreadsheet_id: str) -> pd.DataFrame | None:
+    """
+    Une pestañas tipo INEC: PROVINCIAS, CANTONES, PARROQUIAS (códigos + nombres DPA_*).
+    """
+    gc = _gspread_client()
+    try:
+        sh = gc.open_by_key(spreadsheet_id)
+    except Exception:
+        return None
+    titles = {ws.title.strip() for ws in sh.worksheets()}
+    pt, ct, rt = _ubicaciones_sheet_title_provinces(), _ubicaciones_sheet_title_cantones(), _ubicaciones_sheet_title_parroquias()
+    if pt not in titles or ct not in titles or rt not in titles:
+        return None
+
+    def _read_tab(title: str) -> pd.DataFrame | None:
+        try:
+            ws = sh.worksheet(title)
+            raw = _ubicaciones_raw_df_from_vals(ws.get_all_values())
+            return raw
+        except Exception:
+            return None
+
+    pdf, cdf, rdf = _read_tab(pt), _read_tab(ct), _read_tab(rt)
+    if pdf is None or cdf is None or rdf is None or pdf.empty or cdf.empty or rdf.empty:
+        return None
+
+    p_code = _pick_first_col(pdf, ("DPA_PROVIN", "COD_PROVIN", "COD_PROV"))
+    p_name = _pick_first_col(pdf, ("DPA_DESPRO", "DESPRO", "NOMBRE PROVINCIA", "PROVINCIA"))
+    c_code = _pick_first_col(cdf, ("DPA_CANTON", "COD_CANTON", "COD_CANT"))
+    c_name = _pick_first_col(cdf, ("DPA_DESCAN", "DESCAN", "NOMBRE CANTON", "CANTON", "CANTÓN"))
+    c_prov = _pick_first_col(cdf, ("DPA_PROVIN", "COD_PROVIN", "COD_PROV"))
+    r_par = _pick_first_col(rdf, ("DPA_PARROQ", "COD_PARROQ", "COD_PARRO"))
+    r_name = _pick_first_col(rdf, ("DPA_DESPAR", "DESPAR", "NOMBRE PARROQUIA", "PARROQUIA"))
+    r_cant = _pick_first_col(rdf, ("DPA_CANTON", "COD_CANTON", "COD_CANT"))
+
+    if not all([p_code, p_name, c_code, c_name, c_prov, r_par, r_name, r_cant]):
+        return None
+
+    p = pdf[[p_code, p_name]].copy()
+    p.columns = ["prov_c", "PROVINCIA"]
+    c = cdf[[c_code, c_name, c_prov]].copy()
+    c.columns = ["cant_c", "CANTON", "prov_c"]
+    r = rdf[[r_par, r_name, r_cant]].copy()
+    r.columns = ["par_c", "PARROQUIA", "cant_c"]
+    for d in (p, c, r):
+        for col in d.columns:
+            d[col] = d[col].astype(str).str.strip().replace({"nan": "", "None": ""})
+    p = p[(p["prov_c"] != "") & (p["PROVINCIA"] != "")].drop_duplicates(subset=["prov_c"])
+    c = c[(c["cant_c"] != "") & (c["CANTON"] != "") & (c["prov_c"] != "")].drop_duplicates(subset=["cant_c"])
+    r = r[(r["cant_c"] != "") & (r["PARROQUIA"] != "")].drop_duplicates(subset=["par_c"])
+    if p.empty or c.empty or r.empty:
+        return None
+    m = r.merge(c, on="cant_c", how="inner").merge(p, on="prov_c", how="inner")
+    if m.empty:
+        return None
+    out = m[["PROVINCIA", "CANTON", "PARROQUIA"]].drop_duplicates()
+    out = out[(out["PROVINCIA"] != "") & (out["CANTON"] != "") & (out["PARROQUIA"] != "")]
+    return out if not out.empty else None
 
 
 def _ubicaciones_norm_from_sheet_matrix(vals: list[list[str]]) -> pd.DataFrame | None:
@@ -946,8 +1060,19 @@ def _load_ubicaciones_desde_archivo_local() -> None:
                     f"Google Sheets ({_ubi_id}) · pestaña `{_ubicaciones_gsheet_worksheet_spec()}`"
                 )
                 return
+            norm = _ubicaciones_merge_innec_three_tabs(_ubi_id)
+            if norm is not None:
+                st.session_state.ubicaciones_df = norm
+                st.session_state.ubicaciones_source = (
+                    f"Google Sheets ({_ubi_id}) · pestañas "
+                    f"`{_ubicaciones_sheet_title_provinces()}` + `{_ubicaciones_sheet_title_cantones()}` + "
+                    f"`{_ubicaciones_sheet_title_parroquias()}`"
+                )
+                return
             st.session_state.ubicaciones_source = (
-                f"Error: Google Sheets ({_ubi_id}) sin columnas válidas de provincia/cantón/parroquia"
+                f"Error: Google Sheets ({_ubi_id}) · no se pudo leer una sola tabla (prov/cant/parr) "
+                f"ni unir pestañas INEC. Revisa columnas DPA_* o nombres en "
+                f"`{_ubicaciones_gsheet_worksheet_spec()}` / PROVINCIAS / CANTONES / PARROQUIAS."
             )
             return
         except Exception:
@@ -1271,8 +1396,10 @@ div[data-baseweb="input"] > div { min-height: 42px; }
         if _ubi_cfg_id:
             st.caption(
                 "Modo **solo Google Sheets**: con **`PLAN_UBICACIONES_SPREADSHEET_ID`** definido no se usa el Excel "
-                f"ni el CSV de la carpeta del servidor. Pestaña: **`{_ubicaciones_gsheet_worksheet_spec()}`** "
-                f"(`{PLAN_UBICACIONES_WORKSHEET_ENV}`). Comparte el Sheet con la cuenta de servicio."
+                f"ni el CSV de la carpeta del servidor. Pestaña principal: **`{_ubicaciones_gsheet_worksheet_spec()}`** "
+                f"(`{PLAN_UBICACIONES_WORKSHEET_ENV}`). Si esa pestaña es tipo **CODIGOS** y no sirve para listas, "
+                "la app intenta unir automáticamente **PROVINCIAS + CANTONES + PARROQUIAS** (nombres configurables con "
+                f"`{PLAN_UBICACIONES_SHEET_PROVINCIAS_ENV}`, etc.). Comparte el Sheet con la cuenta de servicio."
             )
             st.caption(f"ID de ubicaciones activo (últimos 10 caracteres): `…{_ubi_cfg_id[-10:]}`")
         else:
