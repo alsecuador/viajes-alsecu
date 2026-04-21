@@ -10,7 +10,7 @@ from reportlab.lib.utils import simpleSplit
 from reportlab.lib.pagesizes import LETTER
 from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet
 from reportlab.lib.units import cm
-from reportlab.platypus import Image, Paragraph, SimpleDocTemplate, Spacer, Table, TableStyle
+from reportlab.platypus import Image, KeepTogether, Paragraph, SimpleDocTemplate, Spacer, Table, TableStyle
 
 # Paleta (PDF): títulos de sección azules; etiquetas vs valores en tablas llave-valor
 SECTION_BLUE = colors.HexColor("#0d47a1")
@@ -114,6 +114,21 @@ def _table(
     return t
 
 
+def _section_block(
+    title: str,
+    *content: Any,
+    h_style: ParagraphStyle,
+    gap_title_to_content: float = 7.0,
+    gap_after_section: float = 12.0,
+) -> list[Any]:
+    """
+    Arma una sección con separación más cómoda y manteniendo título + primer bloque juntos.
+    """
+    block_items = [Paragraph(title, h_style), Spacer(1, gap_title_to_content)]
+    block_items.extend(content)
+    return [KeepTogether(block_items), Spacer(1, gap_after_section)]
+
+
 def build_plan_pdf(plan: Any) -> bytes:
     buf = io.BytesIO()
     doc = SimpleDocTemplate(
@@ -139,8 +154,8 @@ def build_plan_pdf(plan: Any) -> bytes:
         parent=styles["Heading2"],
         fontSize=11,
         leading=13,
-        spaceBefore=10,
-        spaceAfter=6,
+        spaceBefore=0,
+        spaceAfter=0,
         textColor=SECTION_BLUE,
         fontName="Helvetica-Bold",
     )
@@ -257,7 +272,6 @@ def build_plan_pdf(plan: Any) -> bytes:
     story.append(Spacer(1, 8))
 
     # 1. Datos generales
-    story.append(Paragraph("1. DATOS GENERALES", h_style))
     cond_list = getattr(plan, "conductores", None) or []
     ced_list = getattr(plan, "cedulas_conductores", None) or []
     cel_list = getattr(plan, "celulares_conductores", None) or []
@@ -294,10 +308,9 @@ def build_plan_pdf(plan: Any) -> bytes:
         col_widths=[6.2 * cm, 11.0 * cm],
         kv_shading=True,
     )
-    story.append(t1)
+    story.extend(_section_block("1. DATOS GENERALES", t1, h_style=h_style))
 
     # 2. Planificación
-    story.append(Paragraph("2. PLANIFICACIÓN DE VIAJE", h_style))
     t2 = _table(
         [
             [_p("Destino (Ciudad/Provincia)", small_label), _p(str(getattr(plan, "destino", "") or ""), small_value)],
@@ -313,36 +326,35 @@ def build_plan_pdf(plan: Any) -> bytes:
         col_widths=[6.2 * cm, 11.0 * cm],
         kv_shading=True,
     )
-    story.append(t2)
-    story.append(Spacer(1, 6))
-
-    story.append(
-        _boxed_text(
-            "Propósito del viaje",
-            str(getattr(plan, "proposito", "") or ""),
-            small_label,
-            small_value,
-            height_cm=2.0,
-        )
-    )
-    story.append(Spacer(1, 6))
-    story.append(
-        _boxed_text(
-            "Condiciones del camino",
-            str(getattr(plan, "condiciones_camino", "") or ""),
-            small_label,
-            small_value,
-            height_cm=0.9,
-        )
-    )
-    story.append(Spacer(1, 6))
-    story.append(
-        _boxed_text(
-            "Observaciones adicionales",
-            str(getattr(plan, "observaciones", "") or ""),
-            small_label,
-            small_value,
-            height_cm=1.6,
+    story.extend(
+        _section_block(
+            "2. PLANIFICACIÓN DE VIAJE",
+            t2,
+            Spacer(1, 8),
+            _boxed_text(
+                "Propósito del viaje",
+                str(getattr(plan, "proposito", "") or ""),
+                small_label,
+                small_value,
+                height_cm=2.0,
+            ),
+            Spacer(1, 8),
+            _boxed_text(
+                "Condiciones del camino",
+                str(getattr(plan, "condiciones_camino", "") or ""),
+                small_label,
+                small_value,
+                height_cm=0.9,
+            ),
+            Spacer(1, 8),
+            _boxed_text(
+                "Observaciones adicionales",
+                str(getattr(plan, "observaciones", "") or ""),
+                small_label,
+                small_value,
+                height_cm=1.6,
+            ),
+            h_style=h_style,
         )
     )
 
@@ -381,21 +393,18 @@ def build_plan_pdf(plan: Any) -> bytes:
                 )
 
     # 3. Paradas ida
-    story.append(Paragraph("3. PARADAS PLANIFICADAS (IDA)", h_style))
     paradas_ida = getattr(plan, "paradas_ida", []) or []
     stops_rows = [["N°", "Lugar / Ciudad", "Motivo", "Tiempo estimado (min)"]]
     for s in paradas_ida:
         stops_rows.append([getattr(s, "n", ""), getattr(s, "lugar", ""), getattr(s, "motivo", ""), getattr(s, "tiempo_min", "")])
-    story.append(
-        _table(
-            stops_rows,
-            col_widths=[1.0 * cm, 5.6 * cm, 7.6 * cm, 4.0 * cm],
-            header_row=True,
-        )
+    t3 = _table(
+        stops_rows,
+        col_widths=[1.0 * cm, 5.6 * cm, 7.6 * cm, 4.0 * cm],
+        header_row=True,
     )
+    story.extend(_section_block("3. PARADAS PLANIFICADAS (IDA)", t3, h_style=h_style))
 
     # 4. Peligros (Paragraph en etiquetas para que el texto haga wrap y no invada la celda de la X)
-    story.append(Paragraph("4. PELIGROS CONOCIDOS / MARCA CON UNA X", h_style))
     hazard_data = [
         [
             _hazard_label_paragraph("Lluvia", hazard_label_style),
@@ -449,10 +458,16 @@ def build_plan_pdf(plan: Any) -> bytes:
             ]
         )
     )
-    story.append(hazards)
-    story.append(Spacer(1, 6))
-    story.append(Paragraph("<font color='#0d47a1'><b>Otros peligros / detalles adicionales:</b></font>", small))
-    story.append(Paragraph((getattr(plan, "otros_peligros", "") or "").replace("\n", "<br/>"), small_value))
+    story.extend(
+        _section_block(
+            "4. PELIGROS CONOCIDOS / MARCA CON UNA X",
+            hazards,
+            Spacer(1, 8),
+            Paragraph("<font color='#0d47a1'><b>Otros peligros / detalles adicionales:</b></font>", small),
+            Paragraph((getattr(plan, "otros_peligros", "") or "").replace("\n", "<br/>"), small_value),
+            h_style=h_style,
+        )
+    )
 
     # Ruta (imagen)
     img_bytes = getattr(plan, "ruta_imagen_bytes", None)
@@ -468,48 +483,45 @@ def build_plan_pdf(plan: Any) -> bytes:
 
     # Pasajeros ida (1 columna)
     story.append(Spacer(1, 8))
-    story.append(Paragraph("Pasajeros (IDA)", h_style))
     pasajeros_ida = getattr(plan, "pasajeros_ida", []) or []
-    story.append(
-        _table(
+    t_pax_ida = _table(
+        [
             [
-                [
-                    _p("Cantidad de Pasajeros", small_label),
-                    _p(str(len(pasajeros_ida)) if pasajeros_ida else "", small_value),
-                ],
-                [_p("Listado", small_label), _p(_join_lines([str(x) for x in pasajeros_ida]), small_value)],
+                _p("Cantidad de Pasajeros", small_label),
+                _p(str(len(pasajeros_ida)) if pasajeros_ida else "", small_value),
             ],
-            col_widths=[6.2 * cm, 11.0 * cm],
-            kv_shading=True,
-        )
+            [_p("Listado", small_label), _p(_join_lines([str(x) for x in pasajeros_ida]), small_value)],
+        ],
+        col_widths=[6.2 * cm, 11.0 * cm],
+        kv_shading=True,
     )
+    story.extend(_section_block("Pasajeros (IDA)", t_pax_ida, h_style=h_style))
 
     # 5. Vuelta (1 columna)
-    story.append(Paragraph("5. VIAJE DE VUELTA", h_style))
     pasajeros_vuelta = getattr(plan, "pasajeros_vuelta", []) or []
-    story.append(
-        _table(
+    t5 = _table(
+        [
+            [_p("Hora de salida", small_label), _p(str(getattr(plan, "vuelta_hora_salida", "") or ""), small_value)],
             [
-                [_p("Hora de salida", small_label), _p(str(getattr(plan, "vuelta_hora_salida", "") or ""), small_value)],
-                [
-                    _p("Hora estimada de llegada", small_label),
-                    _p(str(getattr(plan, "vuelta_hora_llegada", "") or ""), small_value),
-                ],
-                [_p("Fecha de salida", small_label), _p(_fmt_date(getattr(plan, "vuelta_fecha_salida", None)), small_value)],
-                [
-                    _p("Fecha estimada de llegada", small_label),
-                    _p(_fmt_date(getattr(plan, "vuelta_fecha_llegada", None)), small_value),
-                ],
-                [
-                    _p("Cantidad de Pasajeros", small_label),
-                    _p(str(len(pasajeros_vuelta)) if pasajeros_vuelta else "", small_value),
-                ],
-                [_p("Listado", small_label), _p(_join_lines([str(x) for x in pasajeros_vuelta]), small_value)],
+                _p("Hora estimada de llegada", small_label),
+                _p(str(getattr(plan, "vuelta_hora_llegada", "") or ""), small_value),
             ],
-            col_widths=[6.2 * cm, 11.0 * cm],
-            kv_shading=True,
-        )
+            [_p("Fecha de salida", small_label), _p(_fmt_date(getattr(plan, "vuelta_fecha_salida", None)), small_value)],
+            [
+                _p("Fecha estimada de llegada", small_label),
+                _p(_fmt_date(getattr(plan, "vuelta_fecha_llegada", None)),
+                small_value),
+            ],
+            [
+                _p("Cantidad de Pasajeros", small_label),
+                _p(str(len(pasajeros_vuelta)) if pasajeros_vuelta else "", small_value),
+            ],
+            [_p("Listado", small_label), _p(_join_lines([str(x) for x in pasajeros_vuelta]), small_value)],
+        ],
+        col_widths=[6.2 * cm, 11.0 * cm],
+        kv_shading=True,
     )
+    story.extend(_section_block("5. VIAJE DE VUELTA", t5, h_style=h_style))
 
     # Ruta vuelta (imagen)
     img_vuelta_bytes = getattr(plan, "ruta_vuelta_imagen_bytes", None)
@@ -523,49 +535,44 @@ def build_plan_pdf(plan: Any) -> bytes:
         except Exception:
             story.append(Paragraph("No se pudo incrustar la imagen de ruta (VUELTA).", small))
 
-    story.append(Paragraph("PARADAS PLANIFICADAS (VUELTA)", h_style))
+    
     paradas_vuelta = getattr(plan, "paradas_vuelta", []) or []
     v_rows = [["N°", "Lugar / Ciudad", "Motivo", "Tiempo estimado (min)"]]
     for s in paradas_vuelta:
         v_rows.append([getattr(s, "n", ""), getattr(s, "lugar", ""), getattr(s, "motivo", ""), getattr(s, "tiempo_min", "")])
     if len(v_rows) == 1:
         v_rows.append(["", "", "", ""])
-    story.append(
-        _table(
-            v_rows,
-            col_widths=[1.0 * cm, 5.6 * cm, 7.6 * cm, 4.0 * cm],
-            header_row=True,
-        )
+    t_paradas_vuelta = _table(
+        v_rows,
+        col_widths=[1.0 * cm, 5.6 * cm, 7.6 * cm, 4.0 * cm],
+        header_row=True,
     )
+    story.extend(_section_block("PARADAS PLANIFICADAS (VUELTA)", t_paradas_vuelta, h_style=h_style))
 
     # 6. Aprobación (1 columna)
-    story.append(Paragraph("6. APROBACIÓN", h_style))
     firma_conductores = _join_lines(
         [x for x in [getattr(plan, "firma_conductor_1", ""), getattr(plan, "firma_conductor_2", "")] if x and x != "—"]
     )
     firma_aprueba = _join_lines(
         [x for x in [getattr(plan, "firma_aprueba_1", ""), getattr(plan, "firma_aprueba_2", "")] if x and x != "—"]
     )
-    story.append(
-        _table(
+    t6 = _table(
+        [
             [
-                [
-                    _p("Firma responsable elaboración plan", small_label),
-                    _p(str(getattr(plan, "firma_elabora", "") or ""), small_value),
-                ],
-                [_p("Firma conductor responsable", small_label), _p(firma_conductores, small_value)],
-                [_p("Firma responsable de aprobación plan", small_label), _p(firma_aprueba, small_value)],
-                [_p("Fecha", small_label), _p(_fmt_date(getattr(plan, "fecha_firma", None)), small_value)],
+                _p("Firma responsable elaboración plan", small_label),
+                _p(str(getattr(plan, "firma_elabora", "") or ""), small_value),
             ],
-            col_widths=[6.2 * cm, 11.0 * cm],
-            kv_shading=True,
-        )
+            [_p("Firma conductor responsable", small_label), _p(firma_conductores, small_value)],
+            [_p("Firma responsable de aprobación plan", small_label), _p(firma_aprueba, small_value)],
+            [_p("Fecha", small_label), _p(_fmt_date(getattr(plan, "fecha_firma", None)), small_value)],
+        ],
+        col_widths=[6.2 * cm, 11.0 * cm],
+        kv_shading=True,
     )
+    story.extend(_section_block("6. APROBACIÓN", t6, h_style=h_style))
 
     # 7. Direcciones y contactos (estático)
-    story.append(Paragraph("7. DIRECCIONES Y CONTACTOS PARA CONSULTA", h_style))
-    story.append(
-        Paragraph(
+    contact_text = Paragraph(
             "Estado Vial Oficial (Tiempo Real): Servicio Integrado de Seguridad ECU 911 — "
             "https://www.ecu911.gob.ec/consulta-de-vias/ — @ECU911_ (Google Play / App Store)<br/>"
             "Infraestructura y Obras Públicas: MTOP — https://www.obraspublicas.gob.ec/ — @ObrasPublicasEc<br/>"
@@ -579,8 +586,8 @@ def build_plan_pdf(plan: Any) -> bytes:
             "Seguridad y Asistencia: Policía Nacional — https://www.gob.ec/pn — @PoliciaEcuador",
             small,
         )
-    )
-    story.append(Spacer(1, 6))
+    story.extend(_section_block("7. DIRECCIONES Y CONTACTOS PARA CONSULTA", contact_text, h_style=h_style))
+
     story.append(
         Paragraph(
             "Nota: Los formularios completos se conservarán durante un período de 1 año. "
