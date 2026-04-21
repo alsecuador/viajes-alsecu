@@ -1422,6 +1422,37 @@ div[data-baseweb="input"] > div { min-height: 42px; }
             bd_pick_name=e2_bd_pick if e2_choice == EMERGENCY_FROM_BD else "",
         )
 
+        # Fuera del form: el pegado desde portapapeles no es confiable dentro de st.form.
+        st.subheader("Adjuntos de imagen")
+        st.caption(
+            "Puedes pegar un screenshot con Ctrl+V (Chrome/Edge) o subir archivo. "
+            "Estas imágenes se guardan para el PDF al presionar Generar PDF."
+        )
+        sos_img_bytes = _image_bytes_input(
+            upload_label="Captura de pantalla o imagen desde la app (PNG/JPG)",
+            upload_key="international_sos_uploader",
+            paste_label="Pegar screenshot (International SOS)",
+            allowed_types=["png", "jpg", "jpeg"],
+        )
+        if sos_img_bytes:
+            st.image(sos_img_bytes, caption="Vista previa International SOS", width="stretch")
+        ruta_bytes = _image_bytes_input(
+            upload_label="Sube captura de Google Maps/Waze (IDA) (PNG/JPG)",
+            upload_key="ruta_ida_uploader",
+            paste_label="Pegar screenshot (Ruta IDA)",
+            allowed_types=["png", "jpg", "jpeg"],
+        )
+        if ruta_bytes:
+            st.image(ruta_bytes, caption="Ruta IDA cargada", width="stretch")
+        ruta_vuelta_bytes = _image_bytes_input(
+            upload_label="Sube captura de Google Maps/Waze (VUELTA) (PNG/JPG)",
+            upload_key="ruta_vuelta_uploader",
+            paste_label="Pegar screenshot (Ruta VUELTA)",
+            allowed_types=["png", "jpg", "jpeg"],
+        )
+        if ruta_vuelta_bytes:
+            st.image(ruta_vuelta_bytes, caption="Ruta VUELTA cargada", width="stretch")
+
         with st.form("plan_form", clear_on_submit=False):
             st.subheader("2. Planificación de viaje")
             p1, p2 = st.columns(2)
@@ -1474,14 +1505,6 @@ div[data-baseweb="input"] > div { min-height: 42px; }
                 value="",
                 placeholder="Ej.: nivel de riesgo, recomendaciones, enlace o comentario breve…",
             )
-            sos_img_bytes = _image_bytes_input(
-                upload_label="Captura de pantalla o imagen desde la app (PNG/JPG)",
-                upload_key="international_sos_uploader",
-                paste_label="Pegar screenshot (International SOS)",
-                allowed_types=["png", "jpg", "jpeg"],
-            )
-            if sos_img_bytes:
-                st.image(sos_img_bytes, caption="Vista previa International SOS", width="stretch")
 
             data.proposito = st.text_area("Propósito del viaje", height=120, value="")
 
@@ -1511,16 +1534,6 @@ div[data-baseweb="input"] > div { min-height: 42px; }
                 data.peligro_accidentes_transito = st.checkbox("Accidentes de tránsito")
 
             data.otros_peligros = st.text_area("Otros peligros / detalles adicionales", height=90, value="")
-
-            st.subheader("Ruta para tomar (imagen)")
-            ruta_bytes = _image_bytes_input(
-                upload_label="Sube captura de Google Maps/Waze (PNG/JPG)",
-                upload_key="ruta_ida_uploader",
-                paste_label="Pegar screenshot (Ruta IDA)",
-                allowed_types=["png", "jpg", "jpeg"],
-            )
-            if ruta_bytes:
-                st.image(ruta_bytes, caption="Ruta cargada", width="stretch")
 
             st.subheader("Pasajeros (IDA)")
             pasajeros_ida_sel = st.multiselect(
@@ -1576,16 +1589,6 @@ div[data-baseweb="input"] > div { min-height: 42px; }
                     data.vuelta_hora_llegada = _format_hora_plan(_vl)
                 else:
                     data.vuelta_hora_llegada = ""
-
-            st.subheader("Ruta para tomar (imagen) (VUELTA)")
-            ruta_vuelta_bytes = _image_bytes_input(
-                upload_label="Sube captura de Google Maps/Waze (VUELTA) (PNG/JPG)",
-                upload_key="ruta_vuelta_uploader",
-                paste_label="Pegar screenshot (Ruta VUELTA)",
-                allowed_types=["png", "jpg", "jpeg"],
-            )
-            if ruta_vuelta_bytes:
-                st.image(ruta_vuelta_bytes, caption="Ruta vuelta cargada", width="stretch")
 
             st.subheader("Pasajeros (VUELTA)")
             pasajeros_vuelta_sel = st.multiselect(
