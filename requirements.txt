@@ -41,6 +41,7 @@ rpds-py==0.30.0
 six==1.17.0
 smmap==5.0.3
 streamlit==1.56.0
+streamlit-paste-button==0.1.2
 tenacity==9.1.4
 toml==0.10.2
 tornado==6.5.5

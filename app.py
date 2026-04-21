@@ -14,6 +14,12 @@ import pandas as pd
 import streamlit as st
 from dateutil import parser as date_parser
 from google.oauth2.service_account import Credentials
+from PIL import Image as PILImage
+
+try:
+    from streamlit_paste_button import paste_image_button
+except Exception:
+    paste_image_button = None
 
 from pdf_builder import build_plan_pdf
 
@@ -203,6 +209,44 @@ def _parse_date(value: Any) -> date | None:
 def _format_hora_plan(t: time) -> str:
     """Hora para el PDF / datos (ej. 17h00, 09h05)."""
     return f"{t.hour}h{t.minute:02d}"
+
+
+def _pil_to_png_bytes(img: PILImage.Image) -> bytes:
+    buf = io.BytesIO()
+    img.save(buf, format="PNG")
+    return buf.getvalue()
+
+
+def _image_bytes_input(
+    *,
+    upload_label: str,
+    upload_key: str,
+    paste_label: str,
+    allowed_types: list[str],
+) -> bytes | None:
+    """
+    Entrada de imagen con dos opciones:
+    - Pegar screenshot desde portapapeles (Ctrl+V en navegador compatible).
+    - Subir archivo (fallback universal).
+    Prioridad: imagen pegada > archivo subido.
+    """
+    pasted_bytes: bytes | None = None
+    if paste_image_button is not None:
+        paste_res = paste_image_button(
+            paste_label,
+            key=f"{upload_key}_paste_btn",
+            errors="ignore",
+        )
+        if paste_res is not None and getattr(paste_res, "image_data", None) is not None:
+            try:
+                pasted_bytes = _pil_to_png_bytes(paste_res.image_data)
+                st.caption("Imagen pegada desde portapapeles.")
+            except Exception:
+                pasted_bytes = None
+
+    uploaded = st.file_uploader(upload_label, type=allowed_types, key=upload_key)
+    uploaded_bytes = uploaded.read() if uploaded is not None else None
+    return pasted_bytes or uploaded_bytes
 
 
 def _max_tecnicos_viaje() -> int:
@@ -1430,12 +1474,12 @@ div[data-baseweb="input"] > div { min-height: 42px; }
                 value="",
                 placeholder="Ej.: nivel de riesgo, recomendaciones, enlace o comentario breve…",
             )
-            sos_img = st.file_uploader(
-                "Captura de pantalla o imagen desde la app (PNG/JPG)",
-                type=["png", "jpg", "jpeg"],
-                key="international_sos_uploader",
+            sos_img_bytes = _image_bytes_input(
+                upload_label="Captura de pantalla o imagen desde la app (PNG/JPG)",
+                upload_key="international_sos_uploader",
+                paste_label="Pegar screenshot (International SOS)",
+                allowed_types=["png", "jpg", "jpeg"],
             )
-            sos_img_bytes = sos_img.read() if sos_img is not None else None
             if sos_img_bytes:
                 st.image(sos_img_bytes, caption="Vista previa International SOS", width="stretch")
 
@@ -1469,8 +1513,12 @@ div[data-baseweb="input"] > div { min-height: 42px; }
             data.otros_peligros = st.text_area("Otros peligros / detalles adicionales", height=90, value="")
 
             st.subheader("Ruta para tomar (imagen)")
-            ruta = st.file_uploader("Sube captura de Google Maps/Waze (PNG/JPG)", type=["png", "jpg", "jpeg"])
-            ruta_bytes = ruta.read() if ruta is not None else None
+            ruta_bytes = _image_bytes_input(
+                upload_label="Sube captura de Google Maps/Waze (PNG/JPG)",
+                upload_key="ruta_ida_uploader",
+                paste_label="Pegar screenshot (Ruta IDA)",
+                allowed_types=["png", "jpg", "jpeg"],
+            )
             if ruta_bytes:
                 st.image(ruta_bytes, caption="Ruta cargada", width="stretch")
 
@@ -1530,12 +1578,12 @@ div[data-baseweb="input"] > div { min-height: 42px; }
                     data.vuelta_hora_llegada = ""
 
             st.subheader("Ruta para tomar (imagen) (VUELTA)")
-            ruta_vuelta = st.file_uploader(
-                "Sube captura de Google Maps/Waze (VUELTA) (PNG/JPG)",
-                type=["png", "jpg", "jpeg"],
-                key="ruta_vuelta_uploader",
+            ruta_vuelta_bytes = _image_bytes_input(
+                upload_label="Sube captura de Google Maps/Waze (VUELTA) (PNG/JPG)",
+                upload_key="ruta_vuelta_uploader",
+                paste_label="Pegar screenshot (Ruta VUELTA)",
+                allowed_types=["png", "jpg", "jpeg"],
             )
-            ruta_vuelta_bytes = ruta_vuelta.read() if ruta_vuelta is not None else None
             if ruta_vuelta_bytes:
                 st.image(ruta_vuelta_bytes, caption="Ruta vuelta cargada", width="stretch")
 
@@ -1633,7 +1681,7 @@ div[data-baseweb="input"] > div { min-height: 42px; }
             data.ruta_imagen_bytes = ruta_bytes
             data.ruta_vuelta_imagen_bytes = ruta_vuelta_bytes
             data.international_sos_imagen_bytes = sos_img_bytes
-            data.international_sos_imagen_mime = sos_img.type if sos_img is not None else None
+            data.international_sos_imagen_mime = "image/png" if sos_img_bytes else None
 
             pdf_bytes = build_plan_pdf(data)
             final_pdf_name = filename if filename.lower().endswith(".pdf") else f"{filename}.pdf"
