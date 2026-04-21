@@ -384,6 +384,40 @@ def _worksheet_to_dataframe(ws: gspread.Worksheet) -> pd.DataFrame:
     return df.fillna("").astype(str)
 
 
+def _ubicaciones_norm_from_sheet_matrix(vals: list[list[str]]) -> pd.DataFrame | None:
+    """
+    CODIFICACIÓN INEC en Google Sheets suele igual que en Excel: títulos en fila 2 (índice 1).
+    Prueba varias filas de encabezado hasta que _normalize_ubicaciones_df reconozca columnas.
+    """
+    if not vals or len(vals) < 2:
+        return None
+    for header_ix in (1, 0, 2, 3):
+        if header_ix >= len(vals):
+            continue
+        header = [str(h).strip() for h in vals[header_ix]]
+        if not header or not any(h for h in header):
+            continue
+        data = vals[header_ix + 1 :]
+        ncols = len(header)
+        padded: list[list[str]] = []
+        for row in data:
+            cells = [str(c) if c is not None else "" for c in row]
+            if len(cells) < ncols:
+                cells = cells + [""] * (ncols - len(cells))
+            else:
+                cells = cells[:ncols]
+            if any(str(c).strip() for c in cells):
+                padded.append(cells)
+        if not padded:
+            continue
+        df = pd.DataFrame(padded, columns=header)
+        df = df.fillna("").astype(str)
+        norm = _normalize_ubicaciones_df(df)
+        if norm is not None:
+            return norm
+    return None
+
+
 def _dataframe_to_worksheet(ws: gspread.Worksheet, df: pd.DataFrame) -> None:
     """Sustituye el contenido de la hoja por el DataFrame (cabecera + filas)."""
     ws.clear()
@@ -732,12 +766,16 @@ def _pick_columna_geografia(df: pd.DataFrame, tipo: str) -> str | None:
     cols = list(df.columns)
 
     # Nomenclatura estándar INEC en Excel CODIFICACIÓN (nombres geográficos, no códigos)
-    dpa_token = {"PROVINCIA": "DESPRO", "CANTON": "DESCAN", "PARROQUIA": "DESPAR"}
-    tok = dpa_token[tipo]
-    for c in cols:
-        u = _col_norm(c)
-        if tok in u:
-            return c
+    dpa_tokens = {
+        "PROVINCIA": ("DESPRO", "NOMPRO", "NOM_PRO", "DPA_DESPRO"),
+        "CANTON": ("DESCAN", "NOMCAN", "NOM_CAN", "DPA_DESCAN", "DPA_DESCANT"),
+        "PARROQUIA": ("DESPAR", "NOMPAR", "NOM_PAR", "DPA_DESPAR"),
+    }
+    for tok in dpa_tokens[tipo]:
+        for c in cols:
+            u = _col_norm(c)
+            if tok in u:
+                return c
 
     def score(col_name: str) -> tuple[int, int]:
         u = _col_norm(col_name)
@@ -900,8 +938,8 @@ def _load_ubicaciones_desde_archivo_local() -> None:
     if _ubi_id:
         try:
             ws = _open_worksheet(_ubi_id, _ubicaciones_gsheet_worksheet_spec())
-            raw = _worksheet_to_dataframe(ws)
-            norm = _normalize_ubicaciones_df(raw)
+            vals = ws.get_all_values()
+            norm = _ubicaciones_norm_from_sheet_matrix(vals)
             if norm is not None:
                 st.session_state.ubicaciones_df = norm
                 st.session_state.ubicaciones_source = (
