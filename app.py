@@ -31,13 +31,19 @@ _DEFAULT_GSHEET_VEHICLES_ID = "1ZnUoIG--aGTtUC54pp_UJqQOm0d2ERfAc64XqhPy_yY"
 
 
 def _env_or_secret(key: str, default: str = "") -> str:
-    """Variable de entorno o clave de primer nivel en st.secrets (p. ej. Streamlit Community Cloud)."""
+    """Variable de entorno o clave en st.secrets (primer nivel o dentro de un bloque tipo [seccion])."""
     v = (os.environ.get(key) or "").strip()
     if v:
         return v
     try:
-        if key in st.secrets:
-            return str(st.secrets[key]).strip()
+        sec = st.secrets
+        if key in sec:
+            return str(sec[key]).strip()
+        for _block, val in sec.items():
+            if isinstance(val, dict) and key in val:
+                inner = val.get(key)
+                if inner is not None and str(inner).strip():
+                    return str(inner).strip()
     except Exception:
         pass
     return (default or "").strip()
@@ -1212,6 +1218,13 @@ div[data-baseweb="input"] > div { min-height: 42px; }
         st.subheader("Ubicaciones (opcional)")
         _xlsx_here = _ruta_excel_codificacion()
         _ubi_cfg_id = _gsheet_ubicaciones_spreadsheet_id()
+        if not _ubi_cfg_id:
+            st.warning(
+                "La app **no está leyendo** `PLAN_UBICACIONES_SPREADSHEET_ID` (sale vacío). "
+                "Por eso se usa Excel/CSV local si existe. Revisa **App settings → Secrets**: la clave debe estar "
+                "en el TOML (puede ser al inicio del archivo o dentro de un bloque `[...]`), pulsa **Save changes** "
+                "y luego **Reboot app**."
+            )
         if _ubi_cfg_id:
             st.caption(
                 "Modo **solo Google Sheets**: con **`PLAN_UBICACIONES_SPREADSHEET_ID`** definido no se usa el Excel "
