@@ -3,6 +3,7 @@ from __future__ import annotations
 import io
 import json
 import os
+from collections.abc import Mapping
 import re
 import uuid
 from dataclasses import dataclass, field
@@ -40,7 +41,8 @@ def _env_or_secret(key: str, default: str = "") -> str:
         if key in sec:
             return str(sec[key]).strip()
         for _block, val in sec.items():
-            if isinstance(val, dict) and key in val:
+            # Streamlit puede exponer bloques [x] como Mapping que no es dict puro.
+            if isinstance(val, Mapping) and key in val:
                 inner = val.get(key)
                 if inner is not None and str(inner).strip():
                     return str(inner).strip()
@@ -310,7 +312,10 @@ def _load_service_account_dict() -> dict[str, Any]:
         for block_name in ("google_service_account", "gspread", "credenciales", "service_account"):
             if block_name in sec:
                 block = sec[block_name]
-                d = {k: block[k] for k in block.keys()}
+                if not isinstance(block, Mapping):
+                    continue
+                # Claves tipo PLAN_* en el mismo bloque [google_service_account] no son del JSON de Google.
+                d = {k: block[k] for k in block.keys() if not str(k).startswith("PLAN_")}
                 if d.get("type") == "service_account":
                     return d
         if sec.get("type") == "service_account":
