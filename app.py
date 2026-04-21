@@ -1619,19 +1619,6 @@ div[data-baseweb="input"] > div { min-height: 42px; }
                     "disco accesible, puedes guardar una copia en una carpeta local o de red."
                 )
 
-            save_to_folder = st.checkbox("Guardar copia en carpeta (local o red)", value=True)
-            st.text_input(
-                "Carpeta destino del PDF (opcional)",
-                key="shared_pdf_folder",
-                placeholder=r"Ej: \\Servidor\Compartido\PlanesViaje  o  P:\Planes",
-                help=(
-                    "Ruta accesible **desde el PC que ejecuta Streamlit** (no desde el navegador). "
-                    "Puede ser una carpeta de red ya mapeada o una ruta UNC. "
-                    "Si queda vacía, se guarda en la carpeta de trabajo del servidor. "
-                    f"También puedes definir la variable de entorno {PDF_OUTPUT_DIR_ENV}."
-                ),
-            )
-
             submitted = st.form_submit_button("Generar PDF", type="primary")
 
         if submitted:
@@ -1652,21 +1639,6 @@ div[data-baseweb="input"] > div { min-height: 42px; }
             final_pdf_name = filename if filename.lower().endswith(".pdf") else f"{filename}.pdf"
             st.session_state[SESSION_PLAN_PDF_BYTES] = pdf_bytes
             st.session_state[SESSION_PLAN_PDF_FILENAME] = final_pdf_name
-            if save_to_folder:
-                base_name = os.path.basename(final_pdf_name)
-                dest_dir = (st.session_state.get("shared_pdf_folder") or "").strip()
-                try:
-                    if dest_dir:
-                        os.makedirs(dest_dir, exist_ok=True)
-                        out_path = os.path.join(dest_dir, base_name)
-                    else:
-                        out_path = base_name
-                    with open(out_path, "wb") as f:
-                        f.write(pdf_bytes)
-                    st.success(f"Guardado en: {os.path.abspath(out_path)}")
-                except Exception as e:
-                    st.warning(f"No se pudo guardar en carpeta: {e}")
-
         _pdf_dl = st.session_state.get(SESSION_PLAN_PDF_BYTES)
         _pdf_name_dl = (st.session_state.get(SESSION_PLAN_PDF_FILENAME) or "").strip() or "PLAN_GESTION_VIAJE.pdf"
         if _pdf_dl is not None:
