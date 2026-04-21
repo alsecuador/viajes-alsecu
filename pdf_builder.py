@@ -24,6 +24,8 @@ BORDER = colors.HexColor("#D0D5DC")
 TABLE_GRID_WIDTH = 0.25
 TABLE_PAD_LR = 10
 TABLE_PAD_TB = 8
+# Márgenes de página (LETTER): izquierdo, derecho, superior e inferior
+PDF_PAGE_MARGIN = 1.5 * cm
 
 
 def _fmt_date(d: date | None) -> str:
@@ -160,10 +162,10 @@ def build_plan_pdf(plan: Any) -> bytes:
     doc = SimpleDocTemplate(
         buf,
         pagesize=LETTER,
-        leftMargin=1.3 * cm,
-        rightMargin=1.3 * cm,
-        topMargin=1.2 * cm,
-        bottomMargin=1.2 * cm,
+        leftMargin=PDF_PAGE_MARGIN,
+        rightMargin=PDF_PAGE_MARGIN,
+        topMargin=PDF_PAGE_MARGIN,
+        bottomMargin=PDF_PAGE_MARGIN,
         title="PLAN DE GESTIÓN DE VIAJE ALS ECUADOR",
     )
 
