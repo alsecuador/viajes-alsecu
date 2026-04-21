@@ -12,11 +12,11 @@ from reportlab.lib.units import cm
 from reportlab.platypus import Image, KeepTogether, Paragraph, SimpleDocTemplate, Spacer, Table, TableStyle
 
 # Paleta (PDF): títulos de sección azules; etiquetas vs valores en tablas llave-valor
-SECTION_BLUE = colors.HexColor("#0d47a1")
-LABEL_BG = colors.HexColor("#e8eef6")
+SECTION_BLUE = colors.HexColor("#1F4E79")
+LABEL_BG = colors.HexColor("#F3F7FB")
 VALUE_BG = colors.HexColor("#ffffff")
-LABEL_TEXT = colors.HexColor("#37474f")
-BORDER = colors.HexColor("#9aa6b2")
+LABEL_TEXT = colors.HexColor("#2F3A45")
+BORDER = colors.HexColor("#C5CED8")
 
 
 def _fmt_date(d: date | None) -> str:
@@ -452,7 +452,7 @@ def build_plan_pdf(plan: Any) -> bytes:
                 ("RIGHTPADDING", (0, 0), (-1, -1), 8),
                 ("TOPPADDING", (0, 0), (-1, -1), 7),
                 ("BOTTOMPADDING", (0, 0), (-1, -1), 7),
-                ("ROWBACKGROUNDS", (0, 0), (-1, -1), [LABEL_BG, colors.HexColor("#f5f7fb")]),
+                ("ROWBACKGROUNDS", (0, 0), (-1, -1), [LABEL_BG, colors.HexColor("#FAFCFE")]),
                 ("ALIGN", (1, 0), (1, -1), "CENTER"),
                 ("ALIGN", (3, 0), (3, -1), "CENTER"),
                 ("ALIGN", (5, 0), (5, -1), "CENTER"),
